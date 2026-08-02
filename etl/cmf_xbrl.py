@@ -42,7 +42,12 @@ def prefixed_name(element: etree._Element) -> str:
 
 
 def rut_key(value: str) -> str:
-    return re.sub(r"[^0-9Kk]", "", value).upper()
+    normalized = value.replace(".", "").upper()
+    # The CMF download endpoint uses the numeric RUT body. The local catalog
+    # may include the verifier after a hyphen, so remove it before requests.
+    if "-" in normalized:
+        normalized = normalized.split("-", 1)[0]
+    return re.sub(r"[^0-9]", "", normalized)
 
 
 @dataclass(frozen=True)

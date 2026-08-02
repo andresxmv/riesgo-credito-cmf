@@ -32,7 +32,10 @@ app.add_middleware(
 
 
 def clean_rut(value: str) -> str:
-    return re.sub(r"[^0-9Kk]", "", value).upper()
+    normalized = value.replace(".", "").upper()
+    if "-" in normalized:
+        normalized = normalized.split("-", 1)[0]
+    return re.sub(r"[^0-9]", "", normalized)
 
 
 def connection() -> sqlite3.Connection:

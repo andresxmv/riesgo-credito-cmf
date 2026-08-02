@@ -51,3 +51,7 @@ def test_financials_endpoint_returns_cmf_xbrl_units(tmp_path):
     assert payload["metrics"]["revenue"]["values"] == [100.0, 120.0]
     assert payload["metrics"]["revenue"]["unit"] == "USD · XBRL"
     assert payload["lineage"]["documents"][0]["contentHash"] == "real-hash"
+
+
+def test_clean_rut_removes_verifier():
+    assert api_main.clean_rut("93.834.000-5") == "93834000"

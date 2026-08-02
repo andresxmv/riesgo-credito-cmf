@@ -1,10 +1,14 @@
-from etl.cmf_xbrl import Issuer, ManifestStore, SourceDocument, parse_issuer_catalog, parse_number, parse_xbrl
+from etl.cmf_xbrl import Issuer, ManifestStore, SourceDocument, parse_issuer_catalog, parse_number, parse_xbrl, rut_key
 
 
 def test_parse_number_honors_sign_and_scale():
     assert parse_number("1,25", {"scale": "3"}) == "1250.00"
     assert parse_number("10", {"sign": "-"}) == "-10"
     assert parse_number("nil", {"nil": "true"}) is None
+
+
+def test_rut_key_removes_verifier_from_catalog_rut():
+    assert rut_key("93.834.000-5") == "93834000"
 
 
 def test_parse_xbrl_keeps_context_unit_and_dimensions():
