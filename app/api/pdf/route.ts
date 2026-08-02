@@ -305,6 +305,124 @@ function changeFromPrevious(metric: Metric | undefined, quarter: string | null) 
   return (points.at(-1)!.value - points.at(-2)!.value) / Math.abs(points.at(-2)!.value);
 }
 
+type EstimatedRating = {
+  score: number | null;
+  rating: string;
+  confidence: number;
+  outlook: string;
+  trend: string;
+  riskFlags: string[];
+  drivers: string[];
+};
+
+type ModelFeature = { label: string; score: number; weight: number };
+
+function tierScore(value: number | null, tiers: [number, number][]) {
+  if (value === null || !Number.isFinite(value)) return null;
+  for (const [minimum, score] of tiers) if (value >= minimum) return score;
+  return tiers.at(-1)?.[1] ?? null;
+}
+
+function trendChange(metric: Metric | undefined, quarter: string | null) {
+  if (!metric?.values?.length) return null;
+  const points = (metric.periods ?? []).map((period, index) => ({ token: periodToken(period), value: metric.values?.[index] ?? null }))
+    .filter((point): point is { token: string; value: number } => {
+      if (!point.token || point.value === null || !Number.isFinite(point.value)) return false;
+      return !quarter || point.token <= quarter;
+    });
+  if (points.length < 8) return null;
+  const recent = points.slice(-4).reduce((sum, point) => sum + point.value, 0) / 4;
+  const previous = points.slice(-8, -4).reduce((sum, point) => sum + point.value, 0) / 4;
+  if (previous === 0) return null;
+  return (recent - previous) / Math.abs(previous);
+}
+
+function volatilityScore(metric: Metric | undefined, quarter: string | null) {
+  if (!metric?.values?.length) return null;
+  const points = (metric.periods ?? []).map((period, index) => ({ token: periodToken(period), value: metric.values?.[index] ?? null }))
+    .filter((point): point is { token: string; value: number } => {
+      if (!point.token || point.value === null || !Number.isFinite(point.value)) return false;
+      return !quarter || point.token <= quarter;
+    }).slice(-9);
+  if (points.length < 5) return null;
+  const changes = points.slice(1).map((point, index) => points[index].value === 0 ? 0 : (point.value - points[index].value) / Math.abs(points[index].value));
+  const mean = changes.reduce((sum, value) => sum + value, 0) / changes.length;
+  const deviation = Math.sqrt(changes.reduce((sum, value) => sum + (value - mean) ** 2, 0) / changes.length);
+  if (deviation <= 0.08) return 90;
+  if (deviation <= 0.18) return 75;
+  if (deviation <= 0.3) return 55;
+  return 35;
+}
+
+function estimatedGrade(score: number | null) {
+  if (score === null) return "N/D";
+  if (score >= 90) return "AAA";
+  if (score >= 85) return "AA+";
+  if (score >= 80) return "AA";
+  if (score >= 75) return "AA-";
+  if (score >= 70) return "A+";
+  if (score >= 65) return "A";
+  if (score >= 60) return "A-";
+  if (score >= 52) return "BBB";
+  if (score >= 42) return "BB";
+  if (score >= 30) return "B";
+  return "CCC";
+}
+
+function buildEstimatedRating(metrics: Record<string, Metric>, ratios: Record<string, Ratio>, documents: DocumentLineage[], quarter: string | null): EstimatedRating {
+  const features: ModelFeature[] = [];
+  const add = (label: string, score: number | null, weight = 1) => {
+    if (score !== null && Number.isFinite(score)) features.push({ label, score, weight });
+  };
+  const current = ratioValue(ratios, "currentRatio", quarter);
+  const quick = ratioValue(ratios, "quickRatio", quarter);
+  const cash = ratioValue(ratios, "cashRatio", quarter);
+  const debtAssets = ratioValue(ratios, "debtAssets", quarter);
+  const debtEquity = ratioValue(ratios, "debtEquity", quarter);
+  const netDebtEbitda = ratioValue(ratios, "netDebtEbitda", quarter);
+  const coverage = ratioValue(ratios, "interestCoverage", quarter);
+  const roa = ratioValue(ratios, "roa", quarter);
+  const roe = ratioValue(ratios, "roe", quarter);
+  const roic = ratioValue(ratios, "roic", quarter);
+  const fcf = ratioValue(ratios, "fcf", quarter);
+  const revenueTrend = trendChange(metrics.revenue, quarter);
+  const ebitdaTrend = trendChange(metrics.ebitda, quarter);
+
+  add("Liquidez corriente", tierScore(current, [[2, 95], [1.5, 85], [1.2, 72], [1, 55], [0, 30]]), 1.15);
+  add("Liquidez acida", tierScore(quick, [[1.5, 95], [1.1, 82], [0.8, 68], [0.6, 50], [0, 30]]), 1.05);
+  add("Liquidez inmediata", tierScore(cash, [[0.75, 95], [0.5, 82], [0.25, 65], [0.1, 48], [0, 30]]), 0.8);
+  add("Deuda neta / EBITDA", netDebtEbitda === null ? null : netDebtEbitda <= 0 ? 95 : netDebtEbitda <= 1 ? 85 : netDebtEbitda <= 2 ? 72 : netDebtEbitda <= 3 ? 57 : netDebtEbitda <= 4 ? 40 : 25, 1.25);
+  add("Deuda / activos", debtAssets === null ? null : debtAssets <= 0.2 ? 95 : debtAssets <= 0.35 ? 82 : debtAssets <= 0.5 ? 65 : debtAssets <= 0.65 ? 45 : 25, 1.1);
+  add("Deuda / patrimonio", debtEquity === null ? null : debtEquity <= 0.35 ? 92 : debtEquity <= 0.7 ? 78 : debtEquity <= 1 ? 62 : debtEquity <= 1.5 ? 42 : 25, 0.7);
+  add("Cobertura de intereses", tierScore(coverage, [[8, 95], [5, 85], [3, 72], [2, 55], [1, 35], [0, 20]]), 1.25);
+  add("ROA", tierScore(roa, [[10, 92], [5, 80], [2, 68], [0, 55], [-100, 30]]), 0.65);
+  add("ROE", tierScore(roe, [[15, 90], [8, 80], [0, 60], [-100, 30]]), 0.55);
+  add("ROIC", tierScore(roic, [[15, 92], [10, 84], [5, 70], [0, 55], [-100, 30]]), 0.8);
+  add("Flujo de caja libre", fcf === null ? null : fcf > 0 ? 82 : 32, 0.9);
+  add("Tendencia de ingresos", tierScore(revenueTrend, [[0.1, 90], [0.03, 76], [-0.03, 60], [-0.1, 44], [-100, 28]]), 0.8);
+  add("Tendencia de EBITDA", tierScore(ebitdaTrend, [[0.1, 90], [0.03, 76], [-0.03, 60], [-0.1, 44], [-100, 28]]), 1);
+  add("Volatilidad EBITDA", volatilityScore(metrics.ebitda, quarter), 0.45);
+  add("Volatilidad de ingresos", volatilityScore(metrics.revenue, quarter), 0.35);
+
+  const totalWeight = features.reduce((sum, feature) => sum + feature.weight, 0);
+  const score = features.length ? Math.max(0, Math.min(100, Math.round(features.reduce((sum, feature) => sum + feature.score * feature.weight, 0) / totalWeight))) : null;
+  const grade = estimatedGrade(score);
+  const trendDelta = [revenueTrend, ebitdaTrend].filter((value): value is number => value !== null).reduce((sum, value, _, values) => sum + value / values.length, 0);
+  const riskFlags = [
+    current !== null && current < 1 ? "Liquidez corriente bajo 1,0x" : null,
+    quick !== null && quick < 1 ? "Liquidez acida bajo 1,0x" : null,
+    netDebtEbitda !== null && netDebtEbitda > 3 ? "Apalancamiento neto elevado" : null,
+    coverage !== null && coverage < 2 ? "Cobertura de intereses reducida" : null,
+    fcf !== null && fcf < 0 ? "Flujo de caja libre negativo" : null,
+    roic !== null && roic < 0 ? "ROIC negativo" : null,
+  ].filter((value): value is string => Boolean(value));
+  const outlook = score === null ? "N/D" : riskFlags.length >= 3 || trendDelta < -0.1 || score < 42 ? "Negativa" : trendDelta > 0.08 && riskFlags.length <= 1 && score >= 60 ? "Positiva" : "Estable";
+  const trend = score === null ? "N/D" : trendDelta > 0.05 ? "Mejorando" : trendDelta < -0.05 ? "Deteriorando" : "Estable";
+  const confidence = Math.min(95, Math.max(45, 42 + features.length * 3 + Math.min(documents.length, 15)));
+  const drivers = [...features].sort((left, right) => right.score - left.score).slice(0, 3).map((feature) => `${feature.label}: ${formatNumber(feature.score, 0)}/100`);
+  return { score, rating: grade, confidence, outlook, trend, riskFlags, drivers };
+}
+
 function trendWord(change: number | null) {
   if (change === null) return "sin variacion comparable disponible";
   if (change > 0.05) return `aumento de ${formatNumber(change * 100, 1)}% intertrimestral`;
@@ -317,7 +435,7 @@ function sourceSentence(documents: DocumentLineage[], fellerReport?: FellerRepor
   return `La informacion cuantitativa procede de ${documents.length} documento${documents.length === 1 ? "" : "s"} de estados financieros CMF XBRL incorporados al read model${feller}. Las cifras faltantes se mantienen como N/D y no se completan con estimaciones no observadas.`;
 }
 
-function buildNarrative(name: string, metrics: Record<string, Metric>, ratios: Record<string, Ratio>, documents: DocumentLineage[], quarter: string | null, fellerReport?: FellerReport, fellerRatedReport?: FellerReport) {
+function buildNarrative(name: string, metrics: Record<string, Metric>, ratios: Record<string, Ratio>, documents: DocumentLineage[], quarter: string | null, estimate: EstimatedRating, fellerReport?: FellerReport, fellerRatedReport?: FellerReport) {
   const revenue = metricValue(metrics, "revenue", quarter, true);
   const ebitda = metricValue(metrics, "ebitda", quarter, true);
   const ebit = metricValue(metrics, "ebit", quarter, true);
@@ -347,23 +465,22 @@ function buildNarrative(name: string, metrics: Record<string, Metric>, ratios: R
     debtAssets !== null && debtAssets > 0.5 ? `apalancamiento sobre activos elevado (${formatRatio(debtAssets)})` : null,
     fcf !== null && fcf < 0 ? "flujo de caja libre negativo en el periodo observado" : null,
   ].filter((value): value is string => Boolean(value));
-  const topics = fellerReport?.technicalSignals?.topics ?? [];
   return {
-    overview: `Este informe presenta una lectura tecnica del perfil de credito de ${name} al ${periodLabel(quarter)}. La conclusion se construye a partir de los estados financieros reportados en XBRL, los ratios derivados y la referencia publica de agencia disponible. La referencia externa identificada es ${ratingText}. Esta lectura no es una clasificacion oficial ni reemplaza el proceso de una agencia registrada.`,
+    overview: `Este informe presenta una lectura tecnica del perfil de credito de ${name} al ${periodLabel(quarter)}. La conclusion se construye a partir de los estados financieros reportados en XBRL, los ratios derivados y una metodologia interna versionada. La referencia externa identificada es ${ratingText}. La clasificacion estimada CMF CreditView es ${estimate.rating}${estimate.score === null ? "" : ` (${estimate.score}/100)`}, con perspectiva estimada ${estimate.outlook}.`,
     operating: revenue !== null || ebitda !== null
       ? `En una base movil de cuatro trimestres, los ingresos alcanzan ${formatMoney(revenue)} y el EBITDA ${formatMoney(ebitda)}${ebitda !== null && revenue ? `, equivalente a un margen EBITDA de ${formatNumber((ebitda / revenue) * 100, 1)}%` : ""}. El ultimo dato de ingresos muestra ${trendWord(revenueChange)} y el EBITDA registra ${trendWord(ebitdaChange)}. La utilidad neta TTM se ubica en ${formatMoney(income)}; la lectura debe complementarse con el analisis de segmentos y de riesgos operacionales, que no se infieren cuando no estan presentes en XBRL.`
       : "No hay una serie XBRL suficiente para construir una lectura operativa en el trimestre seleccionado. El informe conserva esa limitacion de evidencia y no sustituye los valores faltantes.",
     financial: `La posicion financiera al corte registra caja de ${formatMoney(cash)} y deuda financiera de ${formatMoney(debt)}. El endeudamiento neto es ${formatMoney(netDebt)}, con una razon deuda neta a EBITDA de ${formatRatio(netDebtEbitda)}. La liquidez corriente es ${formatRatio(current)} y la liquidez acida ${formatRatio(quick)}. La cobertura de intereses alcanza ${formatRatio(coverage)}, mientras que el flujo operacional es ${formatMoney(ocf)} y el flujo de caja libre ${formatMoney(fcf)}. Estos indicadores describen capacidad financiera observada; no incorporan supuestos de refinanciamiento futuros no documentados.`,
-    opinion: `Con la informacion disponible, el perfil se caracteriza por ${strengths.length ? strengths.join(", ") : "fortalezas cuantitativas aun no concluyentes"}. Los principales puntos de atencion son ${weaknesses.length ? weaknesses.join(", ") : "la sensibilidad de los resultados a la evolucion de ingresos, margen y liquidez"}. La perspectiva de agencia, cuando existe, se presenta separadamente: ${fellerReport?.outlook || "N/D"}. El modelo interno CMF CreditView permanece identificado como no emitido hasta completar su calibracion y validacion historica.`,
+    opinion: `Con la informacion disponible, el perfil se caracteriza por ${strengths.length ? strengths.join(", ") : "fortalezas cuantitativas aun no concluyentes"}. Los principales puntos de atencion son ${weaknesses.length ? weaknesses.join(", ") : "la sensibilidad de los resultados a la evolucion de ingresos, margen y liquidez"}. CMF CreditView estima una clasificacion ${estimate.rating}${estimate.score === null ? "" : ` (${estimate.score}/100)`}, confianza ${estimate.confidence}/100, perspectiva ${estimate.outlook} y tendencia ${estimate.trend}. La perspectiva oficial de una agencia, cuando existe, se presenta separadamente y no altera esta estimacion interna.`,
     strengths: strengths.length ? strengths.map((item) => `La evidencia cuantitativa muestra ${item}.`) : ["No se identifican fortalezas concluyentes con la informacion cuantitativa disponible al corte."],
     weaknesses: weaknesses.length ? weaknesses.map((item) => `Debe monitorearse ${item}.`) : ["La ausencia de ciertos datos operativos o de mercado limita la profundidad de la opinion."],
     catalysts: [
-      fellerReport?.outlook?.toLowerCase().includes("posit") ? "Una perspectiva positiva de Feller Rate constituye un factor de seguimiento favorable, sujeto a la fuente original." : "Una mejora sostenida de ingresos y EBITDA durante los siguientes trimestres seria un catalizador de credito.",
+      estimate.outlook === "Positiva" ? "La mejora observada en los indicadores y la tendencia estimada favorecen una reevaluacion al alza si se mantienen durante los siguientes trimestres." : "Una mejora sostenida de ingresos y EBITDA durante los siguientes trimestres seria un catalizador de credito.",
       fcf !== null && fcf > 0 ? "La continuidad del flujo de caja libre positivo permitiria sostener liquidez y reducir necesidades de financiamiento." : "La normalizacion del flujo de caja libre seria relevante para fortalecer la flexibilidad financiera.",
     ],
     risks: [
-      ...topics.map((topic) => `La referencia Feller identifica el eje tecnico de ${topic.replace(/_/g, " ")}; se incluye como tema de seguimiento y no como texto copiado del informe fuente.`),
-      ...(weaknesses.length ? weaknesses.map((item) => `Riesgo cuantitativo: ${item}.`) : ["Riesgo de informacion: algunas variables requeridas para una opinion integral no estan disponibles en el read model."]),
+      ...(estimate.riskFlags.length ? estimate.riskFlags.map((item) => `Riesgo cuantitativo: ${item}.`) : ["No se activaron señales cuantitativas de riesgo en el corte seleccionado."]),
+      ...(weaknesses.length ? weaknesses.map((item) => `Debe monitorearse: ${item}.`) : ["La ausencia de ciertos datos operativos o de mercado limita la profundidad de la opinion."]),
     ],
   };
 }
@@ -374,7 +491,8 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
   const documents = payload.lineage?.documents ?? [];
   const fellerReport = fellerReportAt(payload.feller?.reports, selectedQuarter);
   const fellerRatedReport = fellerRatedReportAt(payload.feller?.reports, selectedQuarter);
-  const narrative = buildNarrative(payload.name ?? "Emisor", metrics, ratios, documents, selectedQuarter, fellerReport, fellerRatedReport);
+  const estimate = buildEstimatedRating(metrics, ratios, documents, selectedQuarter);
+  const narrative = buildNarrative(payload.name ?? "Emisor", metrics, ratios, documents, selectedQuarter, estimate, fellerReport, fellerRatedReport);
   const pdf = await PDFDocument.create();
   const fonts: Fonts = {
     regular: await pdf.embedFont(StandardFonts.Helvetica),
@@ -394,20 +512,22 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
     drawRule(page, MARGIN + 18, PAGE_HEIGHT - 267, 170, COLORS.gold);
     drawText(page, payload.name ?? "Emisor", MARGIN + 18, PAGE_HEIGHT - 325, fonts.bold, 23, COLORS.white);
     drawText(page, `RUT ${rut}`, MARGIN + 18, PAGE_HEIGHT - 348, fonts.regular, 11, rgb(0.78, 0.82, 0.86));
-    page.drawRectangle({ x: MARGIN + 18, y: 226, width: PAGE_WIDTH - 2 * MARGIN - 36, height: 154, color: COLORS.navy2, borderColor: rgb(0.24, 0.31, 0.37), borderWidth: 0.8 });
+    page.drawRectangle({ x: MARGIN + 18, y: 204, width: PAGE_WIDTH - 2 * MARGIN - 36, height: 176, color: COLORS.navy2, borderColor: rgb(0.24, 0.31, 0.37), borderWidth: 0.8 });
     drawLabel(page, "CORTE DEL INFORME", MARGIN + 35, 350, fonts, COLORS.gold);
     drawText(page, periodLabel(selectedQuarter), MARGIN + 35, 315, fonts.bold, 24, COLORS.white);
     drawText(page, `Estados financieros XBRL: ${documents.length} documentos`, MARGIN + 35, 288, fonts.regular, 9.5, rgb(0.78, 0.82, 0.86));
     drawText(page, `Referencia Feller Rate: ${fellerRatedReport?.rating ?? "N/D"}  |  Perspectiva: ${fellerRatedReport?.outlook || "N/D"}`, MARGIN + 35, 270, fonts.regular, 9.5, rgb(0.78, 0.82, 0.86));
-    drawText(page, "Modelo interno: no emitido", MARGIN + 35, 252, fonts.regular, 9.5, COLORS.gold);
+    drawText(page, `Clasificacion estimada CMF CreditView: ${estimate.rating}`, MARGIN + 35, 249, fonts.bold, 10.5, COLORS.gold);
+    drawText(page, `Score ${estimate.score === null ? "N/D" : `${estimate.score}/100`}  |  Confianza ${estimate.confidence}/100`, MARGIN + 35, 232, fonts.regular, 9.5, COLORS.white);
+    drawText(page, `Perspectiva estimada: ${estimate.outlook}  |  Tendencia: ${estimate.trend}`, MARGIN + 35, 217, fonts.regular, 9.5, COLORS.white);
     drawText(page, "Documento informativo basado exclusivamente en fuentes publicas.", MARGIN + 18, 88, fonts.italic, 8.5, rgb(0.68, 0.73, 0.78));
     drawText(page, "CMF CreditView  |  01", PAGE_WIDTH - MARGIN - 82, 40, fonts.regular, 8, rgb(0.68, 0.73, 0.78));
   }
 
-  // Executive summary
+  // Resumen ejecutivo
   pageNumber += 1;
   {
-    const page = addPage(pdf, fonts, "Executive summary", `${payload.name ?? "Emisor"}  |  ${periodLabel(selectedQuarter)}`, pageNumber);
+    const page = addPage(pdf, fonts, "Resumen ejecutivo", `${payload.name ?? "Emisor"}  |  ${periodLabel(selectedQuarter)}`, pageNumber);
     let y = PAGE_HEIGHT - 112;
     drawCallout(page, "Lectura de credito", narrative.overview, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, 86, fonts, COLORS.paleGold);
     y -= 112;
@@ -425,35 +545,40 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
     drawKpi(page, "Cobertura de intereses", formatRatio(ratioValue(ratios, "interestCoverage", selectedQuarter)), "EBIT / gasto financiero", MARGIN + kpiWidth + 12, kpiY - 88, kpiWidth, fonts, COLORS.green);
   }
 
-  // Rating page
+  // Estimated classification
   pageNumber += 1;
   {
-    const page = addPage(pdf, fonts, "Clasificaciones y perspectiva", `${payload.name ?? "Emisor"}  |  Agencia externa`, pageNumber);
+    const page = addPage(pdf, fonts, "Clasificacion y perspectiva", `${payload.name ?? "Emisor"}  |  Estimacion CMF CreditView`, pageNumber);
     let y = PAGE_HEIGHT - 112;
-    drawCallout(page, "Separacion metodologica", "La opinion oficial de una agencia y la lectura cuantitativa de CMF CreditView son objetos distintos. Este informe no mezcla ratings oficiales con una clasificacion propia; cualquier resultado interno se identifica como no emitido hasta concluir su validacion.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, 78, fonts, COLORS.paleGold);
+    drawCallout(page, "Resultado estimado", `La clasificacion estimada se obtiene de liquidez, apalancamiento, cobertura, rentabilidad, flujo de caja, tendencia y volatilidad de los estados financieros. Resultado: ${estimate.rating}${estimate.score === null ? "" : ` (${estimate.score}/100)`}. Confianza: ${estimate.confidence}/100.`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, 78, fonts, COLORS.paleGold);
     y -= 108;
-    y = drawSectionTitle(page, "Referencia Feller Rate", MARGIN, y, fonts);
-    drawText(page, fellerRatedReport?.rating ?? "N/D", MARGIN, y - 25, fonts.bold, 30, COLORS.navy);
-    drawText(page, `Perspectiva ${fellerRatedReport?.outlook || "N/D"}`, MARGIN + 88, y - 18, fonts.bold, 11, COLORS.gold);
-    drawText(page, `Fecha de rating: ${fellerRatedReport?.publishedAt ?? "N/D"}`, MARGIN + 88, y - 37, fonts.regular, 8.5, COLORS.muted);
-    drawText(page, `Ultimo comunicado identificado: ${fellerReport?.publishedAt ?? "N/D"}`, MARGIN + 88, y - 51, fonts.regular, 8.5, COLORS.muted);
-    y -= 78;
+    y = drawSectionTitle(page, "Clasificacion estimada CMF CreditView", MARGIN, y, fonts);
+    drawText(page, estimate.rating, MARGIN, y - 31, fonts.bold, 32, COLORS.navy);
+    drawText(page, `Score ${estimate.score === null ? "N/D" : `${estimate.score}/100`}`, MARGIN + 96, y - 20, fonts.bold, 12, COLORS.gold);
+    drawText(page, `Confianza ${estimate.confidence}/100`, MARGIN + 96, y - 40, fonts.regular, 8.5, COLORS.muted);
+    drawText(page, `Perspectiva estimada: ${estimate.outlook}`, MARGIN + 240, y - 20, fonts.bold, 11, COLORS.teal);
+    drawText(page, `Tendencia: ${estimate.trend}`, MARGIN + 240, y - 40, fonts.regular, 8.5, COLORS.muted);
+    y -= 82;
+    y = drawSectionTitle(page, "Factores determinantes", MARGIN, y, fonts);
+    const driverRows = estimate.drivers.length ? estimate.drivers.map((driver) => {
+      const parts = driver.split(": ");
+      return [parts[0], parts.slice(1).join(": ")];
+    }) : [["Cobertura de datos", "Insuficiente para emitir una estimacion"]];
+    y = drawTable(page, ["Factor", "Resultado del modelo"], driverRows, MARGIN, y, [205, 324], fonts, 25) - 28;
+    y = drawSectionTitle(page, "Perspectiva estimada", MARGIN, y, fonts);
+    y = drawParagraph(page, estimate.outlook === "N/D" ? "No existe evidencia suficiente para estimar una perspectiva en el trimestre seleccionado." : `La perspectiva estimada es ${estimate.outlook} y la tendencia ${estimate.trend}. Esta salida se deriva exclusivamente de la trayectoria cuantitativa observada; no copia ni reemplaza la perspectiva publicada por una agencia.`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.3, 14);
+    y = drawSectionTitle(page, "Referencia oficial separada", MARGIN, y, fonts);
     const ratingRows = fellerReport || fellerRatedReport
-      ? (fellerReport?.classificationRows?.length ? fellerReport.classificationRows : [{ instrument: "Solvencia", date: fellerRatedReport?.publishedAt ?? "N/D", rating: fellerRatedReport?.rating ?? "N/D", outlook: fellerRatedReport?.outlook ?? "N/D" }]).slice(0, 8).map((row) => [row.instrument ?? "Instrumento", row.rating ?? "N/D", row.outlook || "N/D", row.date ?? fellerReport?.publishedAt ?? "N/D"])
+      ? (fellerReport?.classificationRows?.length ? fellerReport.classificationRows : [{ instrument: "Solvencia", date: fellerRatedReport?.publishedAt ?? "N/D", rating: fellerRatedReport?.rating ?? "N/D", outlook: fellerRatedReport?.outlook ?? "N/D" }]).slice(0, 4).map((row) => [row.instrument ?? "Instrumento", row.rating ?? "N/D", row.outlook || "N/D", row.date ?? fellerReport?.publishedAt ?? "N/D"])
       : [["Solvencia", "N/D", "N/D", "Sin referencia"]];
-    y = drawTable(page, ["Instrumento", "Rating", "Outlook", "Fecha"], ratingRows, MARGIN, y, [190, 85, 135, 89], fonts, 25) - 30;
-    y = drawSectionTitle(page, "Lectura de perspectiva", MARGIN, y, fonts);
-    y = drawParagraph(page, fellerReport?.outlook ? `La perspectiva publicada para la referencia seleccionada es ${fellerReport.outlook}. Se muestra como dato de agencia y debe leerse junto con la fecha del comunicado, el instrumento clasificado y las condiciones descritas por la fuente original.` : "No se encontro una perspectiva explicita en el registro publico asociado al trimestre. La ausencia de outlook no se interpreta como estable ni como negativa.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.3, 14);
-    y = drawParagraph(page, `Fuente: ${fellerReport?.sourceUrl ?? payload.feller?.profileUrl ?? "No disponible"}`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 7.5, 11, COLORS.muted);
-    drawSectionTitle(page, "Clasificacion CMF CreditView", MARGIN, y, fonts);
-    drawText(page, "N/D  |  No emitida", MARGIN, y - 28, fonts.bold, 18, COLORS.navy);
-    drawParagraph(page, "El modelo hibrido aun no se presenta como una opinion de riesgo. La plataforma conserva la distincion entre datos observados, ratios calculados y una futura salida de modelo versionada.", MARGIN + 145, y - 22, PAGE_WIDTH - MARGIN - (MARGIN + 145), fonts, 8.5, 12, COLORS.muted);
+    y = drawTable(page, ["Instrumento", "Clasificacion", "Perspectiva", "Fecha"], ratingRows, MARGIN, y, [170, 90, 150, 119], fonts, 24) - 18;
+    drawParagraph(page, fellerRatedReport?.rating && fellerRatedReport.rating !== estimate.rating ? `La referencia oficial ${fellerRatedReport.rating} de Feller Rate difiere de la estimacion ${estimate.rating} de CMF CreditView. La diferencia responde a que el modelo interno pondera ratios y tendencias observadas al corte, mientras que la agencia incorpora su propia metodologia, escenarios y juicio cualitativo.` : "La referencia oficial y la estimacion interna se mantienen separadas; no se interpreta la ausencia de una referencia como una clasificacion.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 8.5, 12, COLORS.muted);
   }
 
-  // Credit opinion
+  // Opinion crediticia
   pageNumber += 1;
   {
-    const page = addPage(pdf, fonts, "Credit opinion", `${payload.name ?? "Emisor"}  |  Fortalezas, riesgos y escenarios`, pageNumber);
+    const page = addPage(pdf, fonts, "Opinion crediticia", `${payload.name ?? "Emisor"}  |  Fortalezas, riesgos y escenarios`, pageNumber);
     let y = PAGE_HEIGHT - 112;
     y = drawSectionTitle(page, "Fortalezas crediticias", MARGIN, y, fonts);
     for (const item of narrative.strengths) y = drawParagraph(page, `+  ${item}`, MARGIN + 8, y, PAGE_WIDTH - 2 * MARGIN - 8, fonts, 9.3, 14, COLORS.green);
@@ -463,7 +588,7 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
     y -= 4;
     const half = (PAGE_WIDTH - 2 * MARGIN - 14) / 2;
     drawCallout(page, "Catalizadores", narrative.catalysts.join(" "), MARGIN, y, half, 98, fonts, COLORS.pale);
-    drawCallout(page, "Key risks", narrative.risks.slice(0, 2).join(" "), MARGIN + half + 14, y, half, 98, fonts, COLORS.paleGold);
+    drawCallout(page, "Riesgos clave", narrative.risks.slice(0, 2).join(" "), MARGIN + half + 14, y, half, 98, fonts, COLORS.paleGold);
     y -= 132;
     y = drawSectionTitle(page, "Evaluacion por dimensiones", MARGIN, y, fonts);
     const current = ratioValue(ratios, "currentRatio", selectedQuarter);
@@ -472,43 +597,16 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
     const liquidityText = current === null ? "No concluyente por falta de ratio" : current >= 1.2 ? "Adecuada en la lectura corriente" : "Presionada en la lectura corriente";
     const financialText = coverage === null || debtAssets === null ? "No concluyente por variables faltantes" : coverage >= 3 && debtAssets < 0.5 ? "Capacidad financiera favorable" : "Requiere seguimiento de cobertura y endeudamiento";
     drawTable(page, ["Dimension", "Evaluacion", "Evidencia al corte"], [
-      ["Liquidez", liquidityText, `Current ratio ${formatRatio(current)}; quick ratio ${formatRatio(ratioValue(ratios, "quickRatio", selectedQuarter))}`],
+      ["Liquidez", liquidityText, `Liquidez corriente ${formatRatio(current)}; liquidez acida ${formatRatio(ratioValue(ratios, "quickRatio", selectedQuarter))}`],
       ["Riesgo financiero", financialText, `Cobertura ${formatRatio(coverage)}; deuda/activos ${formatRatio(debtAssets)}`],
-      ["Generacion de caja", fcfText(ratioValue(ratios, "fcf", selectedQuarter)), `FCF ${formatMoney(ratioValue(ratios, "fcf", selectedQuarter))}; OCF ${formatMoney(ratioValue(ratios, "operatingCashFlow", selectedQuarter))}`],
+      ["Generacion de caja", fcfText(ratioValue(ratios, "fcf", selectedQuarter)), `Flujo libre ${formatMoney(ratioValue(ratios, "fcf", selectedQuarter))}; flujo operacional ${formatMoney(ratioValue(ratios, "operatingCashFlow", selectedQuarter))}`],
     ], MARGIN, y - 5, [120, 190, 189], fonts, 31);
-  }
-
-  // Feller technical reference
-  pageNumber += 1;
-  {
-    const page = addPage(pdf, fonts, "Perspectiva y referencia tecnica", `${payload.name ?? "Emisor"}  |  Documento publico de agencia`, pageNumber);
-    let y = PAGE_HEIGHT - 112;
-    const signals = fellerReport?.technicalSignals;
-    y = drawSectionTitle(page, "Referencia tecnica estructurada", MARGIN, y, fonts);
-    y = drawParagraph(page, fellerReport ? `El comunicado publico de Feller Rate del ${fellerReport.publishedAt ?? "fecha no informada"} se incorpora como referencia externa. CMF CreditView utiliza sus metadatos, fecha, clasificaciones, perspectiva y ejes tecnicos para contextualizar la lectura, sin reproducir el cuerpo protegido del informe fuente.` : "No hay un comunicado publico de Feller Rate asociado al trimestre seleccionado. La seccion mantiene la ausencia de informacion como un dato de cobertura.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.3, 14);
-    y = drawTable(page, ["Campo", "Registro"], [
-      ["Emisor / perfil", payload.feller?.profileUrl ?? "N/D"],
-      ["Comunicado", fellerReport?.title ?? "N/D"],
-      ["Clasificacion", fellerReport?.rating ?? fellerRatedReport?.rating ?? "N/D"],
-      ["Perspectiva", fellerReport?.outlook || fellerRatedReport?.outlook || "N/D"],
-      ["Watch", fellerReport?.watch || "N/D"],
-      ["Escenarios", `Base ${signals?.hasBaseScenario ? "si" : "no"} | Baja ${signals?.hasDownsideScenario ? "si" : "no"} | Alza ${signals?.hasUpsideScenario ? "si" : "no"}`],
-    ], MARGIN, y, [135, 364], fonts, 29) - 28;
-    y = drawSectionTitle(page, "Ejes de seguimiento", MARGIN, y, fonts);
-    const topics = signals?.topics ?? [];
-    if (topics.length) {
-      const topicRows = topics.map((topic) => [topic.replace(/_/g, " "), "Tema identificado en metadatos publicos de Feller Rate", "Monitorear"]);
-      y = drawTable(page, ["Eje", "Lectura", "Estado"], topicRows, MARGIN, y, [125, 285, 89], fonts, 25) - 25;
-    } else {
-      y = drawParagraph(page, "No se identificaron ejes tecnicos estructurados en la fuente publica disponible.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.3, 14);
-    }
-    drawCallout(page, "Nota de uso", "La perspectiva y los escenarios pertenecen a la agencia citada. El texto analitico de este informe es generado por CMF CreditView a partir de datos observados y no constituye una transcripcion ni una opinion de Feller Rate.", MARGIN, y - 2, PAGE_WIDTH - 2 * MARGIN, 76, fonts, COLORS.paleGold);
   }
 
   // Financial profile
   pageNumber += 1;
   {
-    const page = addPage(pdf, fonts, "Financial profile", `${payload.name ?? "Emisor"}  |  Flujo y posicion financiera`, pageNumber);
+    const page = addPage(pdf, fonts, "Perfil financiero", `${payload.name ?? "Emisor"}  |  Flujo y posicion financiera`, pageNumber);
     let y = PAGE_HEIGHT - 112;
     y = drawSectionTitle(page, "Estados financieros seleccionados", MARGIN, y, fonts);
     y = drawParagraph(page, `Los flujos se presentan como suma de los cuatro trimestres disponibles hasta ${periodLabel(selectedQuarter)} cuando existe una serie trimestral suficiente. Las partidas de balance se muestran al ultimo cierre disponible igual o anterior al trimestre elegido. Unidad monetaria: ${cleanUnit(metrics.revenue?.unit) || "XBRL reportado"}.`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 8.8, 13, COLORS.muted);
@@ -535,14 +633,14 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
   // Ratios
   pageNumber += 1;
   {
-    const page = addPage(pdf, fonts, "Credit ratios", `${payload.name ?? "Emisor"}  |  Indicadores derivados`, pageNumber);
+    const page = addPage(pdf, fonts, "Indicadores de credito", `${payload.name ?? "Emisor"}  |  Ratios derivados`, pageNumber);
     let y = PAGE_HEIGHT - 112;
     y = drawSectionTitle(page, "Ratios de credito", MARGIN, y, fonts);
     y = drawParagraph(page, "Los indicadores se calculan sobre conceptos identificados en los estados financieros XBRL. Un valor N/D significa que el concepto requerido no fue reportado o no pudo validarse para el corte; no se reemplaza por un supuesto.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 8.9, 13, COLORS.muted);
     const liquidityRows = [
-      ["Current ratio", formatRatio(ratioValue(ratios, "currentRatio", selectedQuarter)), "Activo corriente / pasivo corriente"],
-      ["Quick ratio", formatRatio(ratioValue(ratios, "quickRatio", selectedQuarter)), "Liquidez sin inventarios"],
-      ["Cash ratio", formatRatio(ratioValue(ratios, "cashRatio", selectedQuarter)), "Caja / pasivo corriente"],
+      ["Liquidez corriente", formatRatio(ratioValue(ratios, "currentRatio", selectedQuarter)), "Activo corriente / pasivo corriente"],
+      ["Liquidez acida", formatRatio(ratioValue(ratios, "quickRatio", selectedQuarter)), "Liquidez sin inventarios"],
+      ["Liquidez inmediata", formatRatio(ratioValue(ratios, "cashRatio", selectedQuarter)), "Caja / pasivo corriente"],
       ["Deuda / patrimonio", formatRatio(ratioValue(ratios, "debtEquity", selectedQuarter)), "Apalancamiento contable"],
       ["Deuda / activos", formatRatio(ratioValue(ratios, "debtAssets", selectedQuarter)), "Deuda financiera / activos"],
       ["Deuda neta / EBITDA", formatRatio(ratioValue(ratios, "netDebtEbitda", selectedQuarter)), "Apalancamiento neto"],
@@ -558,7 +656,7 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
   // History
   pageNumber += 1;
   {
-    const page = addPage(pdf, fonts, "Financial history", `${payload.name ?? "Emisor"}  |  Tendencia trimestral`, pageNumber);
+    const page = addPage(pdf, fonts, "Historial financiero", `${payload.name ?? "Emisor"}  |  Tendencia trimestral`, pageNumber);
     let y = PAGE_HEIGHT - 112;
     y = drawSectionTitle(page, "Evolucion de ingresos y EBITDA", MARGIN, y, fonts);
     y = drawParagraph(page, "La historia se muestra en base trimestral para conservar la señal de tendencia. El grafico compara magnitudes relativas; las tablas del resto del informe contienen los valores numericos.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 8.8, 13, COLORS.muted);
@@ -567,50 +665,14 @@ async function buildPdf(payload: IssuerPayload, rut: string, selectedQuarter: st
         if (!point.token || point.revenue === null || point.ebitda === null || !Number.isFinite(point.revenue) || !Number.isFinite(point.ebitda)) return false;
         return !selectedQuarter || point.token <= selectedQuarter;
       }).slice(-12);
-    drawBars(page, history.map((point) => point.revenue), history.map((point) => periodLabel(point.period)), MARGIN, y - 12, PAGE_WIDTH - 2 * MARGIN, 150, fonts, COLORS.gold);
-    drawText(page, "Ingresos", MARGIN, y - 182, fonts.bold, 7.5, COLORS.gold);
-    drawBars(page, history.map((point) => point.ebitda), history.map((point) => periodLabel(point.period)), MARGIN, y - 208, PAGE_WIDTH - 2 * MARGIN, 150, fonts, COLORS.teal);
-    drawText(page, "EBITDA", MARGIN, y - 378, fonts.bold, 7.5, COLORS.teal);
-    y -= 405;
+    drawBars(page, history.map((point) => point.revenue), history.map((point) => periodLabel(point.period)), MARGIN, y - 10, PAGE_WIDTH - 2 * MARGIN, 96, fonts, COLORS.gold);
+    drawText(page, "Ingresos", MARGIN, y - 119, fonts.bold, 7.5, COLORS.gold);
+    drawBars(page, history.map((point) => point.ebitda), history.map((point) => periodLabel(point.period)), MARGIN, y - 143, PAGE_WIDTH - 2 * MARGIN, 96, fonts, COLORS.teal);
+    drawText(page, "EBITDA", MARGIN, y - 252, fonts.bold, 7.5, COLORS.teal);
+    y -= 278;
     y = drawSectionTitle(page, "Ultimos trimestres", MARGIN, y, fonts);
     const historyRows = history.slice(-8).map((point) => [periodLabel(point.period), formatMoney(point.revenue), formatMoney(point.ebitda), point.revenue ? `${formatNumber((point.ebitda / point.revenue) * 100, 1)}%` : "N/D"]);
     drawTable(page, ["Periodo", "Ingresos", "EBITDA", "Margen"], historyRows, MARGIN, y, [100, 150, 150, 99], fonts, 25);
-  }
-
-  // Methodology
-  pageNumber += 1;
-  {
-    const page = addPage(pdf, fonts, "Metodologia", `${payload.name ?? "Emisor"}  |  Como leer este documento`, pageNumber);
-    let y = PAGE_HEIGHT - 112;
-    y = drawSectionTitle(page, "Base de informacion", MARGIN, y, fonts);
-    y = drawParagraph(page, sourceSentence(documents, fellerReport), MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.2, 14);
-    y = drawParagraph(page, "El flujo de datos sigue la arquitectura CMF -> ETL incremental -> Supabase/read model -> API -> interfaz y PDF. El navegador no consulta directamente la CMF. Cada documento incorporado mantiene URL, periodo, timestamp de recuperacion y huella SHA-256.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.2, 14);
-    y = drawSectionTitle(page, "Reglas de calculo", MARGIN, y + 8, fonts);
-    const rules = [
-      ["Ingresos, EBITDA, EBIT y utilidad", "Suma de los cuatro cierres trimestrales disponibles hasta el periodo seleccionado para aproximar TTM."],
-      ["Caja y deuda", "Ultimo estado de situacion disponible igual o anterior al corte; no se suman periodos."],
-      ["Liquidez", "Activo corriente, quick assets y caja divididos por pasivo corriente, con conceptos XBRL identificados."],
-      ["Apalancamiento", "Deuda financiera y deuda neta contrastadas contra activos, patrimonio y EBITDA."],
-      ["Cobertura", "Resultado operativo dividido por gasto financiero cuando ambos conceptos se encuentran disponibles."],
-      ["Clasificacion", "Feller Rate se presenta como rating oficial de tercero. El modelo interno CMF CreditView permanece como N/D hasta validacion."],
-    ];
-    y = drawTable(page, ["Componente", "Tratamiento"], rules, MARGIN, y, [190, 339], fonts, 37) - 28;
-    drawCallout(page, "Limitacion de uso", "Este documento es una herramienta de analisis y seguimiento. No es una oferta de valores, no constituye asesoramiento financiero y no reemplaza la revision de estados financieros completos, contratos de deuda, covenants, hechos esenciales ni la opinion de una clasificadora registrada.", MARGIN, y, PAGE_WIDTH - 2 * MARGIN, 92, fonts, COLORS.paleGold);
-  }
-
-  // Source appendix
-  pageNumber += 1;
-  {
-    const page = addPage(pdf, fonts, "Data lineage", `${payload.name ?? "Emisor"}  |  Fuentes y trazabilidad`, pageNumber);
-    let y = PAGE_HEIGHT - 112;
-    y = drawSectionTitle(page, "Documentos CMF XBRL incorporados", MARGIN, y, fonts);
-    y = drawParagraph(page, `Se identifican ${documents.length} documentos para el emisor. La siguiente tabla muestra el periodo, timestamp de recuperacion y hash de contenido. Las URL son las fuentes publicas utilizadas por el ETL.`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 8.8, 13, COLORS.muted);
-    const documentRows = documents.slice(0, 18).map((document) => [periodLabel(document.period), document.retrievedAt.replace("T", " ").slice(0, 19), document.contentHash.slice(0, 16), document.sourceUrl]);
-    y = drawTable(page, ["Periodo", "Recuperado", "SHA-256", "Fuente CMF"], documentRows.length ? documentRows : [["N/D", "N/D", "N/D", "No disponible"]], MARGIN, y, [73, 120, 100, 236], fonts, 25) - 28;
-    y = drawSectionTitle(page, "Referencia Feller Rate", MARGIN, y, fonts);
-    y = drawParagraph(page, `Comunicado utilizado: ${fellerReport?.sourceUrl ?? "N/D"}. PDF de fuente: ${fellerReport?.pdfUrl ?? "N/D"}. Hash de registro: ${fellerReport?.contentHash ?? "N/D"}. Recuperado: ${fellerReport?.retrievedAt ?? "N/D"}.`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 8.4, 12, COLORS.muted);
-    y = drawSectionTitle(page, "Cierre", MARGIN, y + 8, fonts);
-    drawParagraph(page, `Informe generado para ${payload.name ?? "el emisor"}, RUT ${rut}, con corte ${periodLabel(selectedQuarter)}. Fuente principal: CMF XBRL publico. La informacion se conserva con timestamp y no se completa con datos inventados.`, MARGIN, y, PAGE_WIDTH - 2 * MARGIN, fonts, 9.2, 14);
   }
 
   return Buffer.from(await pdf.save());
