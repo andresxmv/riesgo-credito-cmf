@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 DB_PATH = Path(os.getenv("CMF_DB_PATH", "data/cmf/cmf.db"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 METRICS: dict[str, dict[str, Any]] = {
     "revenue": {"label": "Ingresos", "unit": "CLP mm", "tone": "gold", "patterns": ["revenue", "sales", "ingresos", "ventas"]},
     "ebitda": {"label": "EBITDA", "unit": "CLP mm", "tone": "mint", "patterns": ["ebitda"]},
@@ -44,6 +45,18 @@ def connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def postgres_connection():
+    if not DATABASE_URL:
+        return None
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"CMF PostgreSQL is not available: {error}") from error
 
 
 def local_concept(concept: str) -> str:
@@ -105,6 +118,54 @@ def build_metrics(rows: list[sqlite3.Row]) -> dict[str, dict[str, Any]]:
 
 def issuer_payload(rut: str) -> dict[str, Any]:
     normalized = clean_rut(rut)
+    if DATABASE_URL:
+        conn = postgres_connection()
+        try:
+            documents = conn.execute(
+                """
+                SELECT period_code AS period, source_url, content_hash, retrieved_at
+                FROM public.source_document
+                WHERE issuer_rut = %s
+                ORDER BY period_code DESC
+                """,
+                (normalized,),
+            ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT issuer_rut, statement_type, concept, context_id,
+                       period_start, period_end, instant, unit, decimals,
+                       value_numeric, value_text, dimensions::text AS dimensions_json,
+                       source_url
+                FROM public.xbrl_fact
+                WHERE issuer_rut = %s
+                ORDER BY period_end, id
+                """,
+                (normalized,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not documents:
+            raise HTTPException(status_code=404, detail="No CMF XBRL data ingested for this issuer")
+        return {
+            "issuer_rut": normalized,
+            "hasXbrl": True,
+            "metrics": build_metrics(rows),
+            "ratings": [],
+            "events": [],
+            "riskFlags": [],
+            "lineage": {
+                "source": "CMF XBRL · Supabase PostgreSQL",
+                "documents": [
+                    {
+                        "period": document["period"],
+                        "sourceUrl": document["source_url"],
+                        "contentHash": document["content_hash"],
+                        "retrievedAt": document["retrieved_at"],
+                    }
+                    for document in documents
+                ],
+            },
+        }
     conn = connection()
     try:
         documents = conn.execute(
@@ -143,7 +204,11 @@ def issuer_payload(rut: str) -> dict[str, Any]:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "database": str(DB_PATH), "database_exists": DB_PATH.exists()}
+    return {
+        "status": "ok",
+        "database": "postgresql" if DATABASE_URL else str(DB_PATH),
+        "database_exists": True if DATABASE_URL else DB_PATH.exists(),
+    }
 
 
 @app.get("/api/issuer/{rut}/financials")

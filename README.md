@@ -39,6 +39,7 @@ python -m etl.cmf_xbrl --all --from-year 2017 --to-year 2026 --months 3,6,9,12 -
 ## Variables de despliegue
 
 - `CMF_DB_PATH`: ruta del SQLite que lee FastAPI en desarrollo.
+- `DATABASE_URL`: connection string de Supabase PostgreSQL para Render; si existe, FastAPI lee las tablas XBRL de Supabase.
 - `CMF_API_URL`: URL publica del servicio FastAPI en Render; se configura en Vercel.
 - `CMF_ALLOWED_ORIGINS`: origenes permitidos para FastAPI.
 

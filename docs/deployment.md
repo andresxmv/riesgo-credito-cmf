@@ -12,7 +12,7 @@
 ## Flujo operativo actual
 
 1. Ejecutar el ETL desde un worker o GitHub Actions con `--all`; el manifiesto evita volver a descargar periodos ya procesados.
-2. En desarrollo, FastAPI lee `CMF_DB_PATH`. En produccion, aplicar `supabase/migrations/20260802000000_cmf_xbrl.sql` y publicar el mismo read model en PostgreSQL/Supabase.
+2. En desarrollo, FastAPI lee `CMF_DB_PATH`. En produccion, aplicar `supabase/migrations/20260802000000_cmf_xbrl.sql`, configurar `DATABASE_URL` y publicar el read model en PostgreSQL/Supabase.
 3. Desplegar FastAPI en Render usando `render.yaml` y comprobar `/health`.
 4. Configurar `CMF_API_URL` en Vercel. Next.js llamara al proxy interno, nunca a la CMF.
 5. Verificar que un RUT con datos muestra `sourceUrl`, hash y timestamp y que un RUT sin datos muestra estado vacio.
