@@ -1,0 +1,16 @@
+render.yaml
+/api/
+/data/
+/etl/
+/supabase/
+/docs/
+/tests/
+/examples/
+/dist/
+/.next/
+/node_modules/
+/.openai/
+/.vercel/
+.env*
+*.db
+*.sqlite

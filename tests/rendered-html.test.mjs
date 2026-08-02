@@ -35,7 +35,8 @@ test("server-renders the CreditView issuer surface", async () => {
   assert.match(html, /Cencosud S\.A\./i);
   assert.match(html, /Official ratings/);
   assert.match(html, /Operating performance/);
-  assert.match(html, /Reference dataset/);
+  assert.match(html, /CMF issuer master/);
+  assert.match(html, /346(?:<!-- -->)?\s*emisores vigentes/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
@@ -47,7 +48,8 @@ test("does not retain the disposable starter skeleton", async () => {
   ]);
 
   assert.match(page, /creditview-shell/);
-  assert.match(page, /Reference dataset/);
+  assert.match(page, /issuerCatalog/);
+  assert.match(page, /CMF issuer master/);
   assert.doesNotMatch(page, /SkeletonPreview|_sites-preview/);
   assert.match(layout, /title:\s*"CMF CreditView/);
   assert.doesNotMatch(layout, /codex-preview|_sites-preview/);

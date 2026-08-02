@@ -804,6 +804,9 @@ h1 span {
 }
 
 .report-button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
   border-color: var(--gold);
   background: var(--gold);
   color: #1a1814;
@@ -821,6 +824,44 @@ h1 span {
   margin-bottom: 15px;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
+}
+
+.issuer-data-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--border);
+}
+
+.issuer-data-status > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.issuer-data-status span,
+.issuer-data-status small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.issuer-data-status strong {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issuer-data-status > div:first-child strong {
+  color: var(--mint);
 }
 
 .issuer-meta-grid > div {
@@ -1229,6 +1270,17 @@ h2 {
   padding: 13px 0 0;
 }
 
+.chart-empty {
+  display: grid;
+  min-height: 226px;
+  place-items: center;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+
 .chart-y-axis {
   display: flex;
   width: 47px;
@@ -1538,6 +1590,22 @@ td strong {
   display: grid;
 }
 
+.empty-inline,
+.empty-table {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.empty-inline {
+  padding: 14px 0;
+}
+
+.empty-table {
+  padding: 18px 10px !important;
+  text-align: center;
+}
+
 .event-row {
   display: grid;
   grid-template-columns: 67px 84px minmax(0, 1fr) 16px;
@@ -1751,6 +1819,10 @@ td strong {
   }
 
   .issuer-meta-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .issuer-data-status {
     grid-template-columns: repeat(2, 1fr);
   }
 
