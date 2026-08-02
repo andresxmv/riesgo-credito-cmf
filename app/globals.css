@@ -773,6 +773,31 @@ h1 span {
   gap: 8px;
 }
 
+.quarter-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 31px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.quarter-picker select {
+  min-width: 68px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  letter-spacing: 0;
+}
+
 .watch-button,
 .report-button,
 .export-button,

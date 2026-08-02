@@ -49,6 +49,15 @@ type RatioData = {
   series?: { period: string; value: number }[];
 };
 
+type FellerReport = {
+  publishedAt?: string | null;
+  title?: string;
+  rating?: string | null;
+  outlook?: string | null;
+  watch?: string | null;
+  sourceUrl?: string;
+};
+
 type IssuerViewData = {
   issuer_rut?: string;
   name?: string;
@@ -59,6 +68,7 @@ type IssuerViewData = {
   riskFlags: { label: string; value: string; tone: string }[];
   hasXbrl: boolean;
   lineage?: { source?: string; documents?: LineageDocument[] };
+  feller?: { profileUrl?: string; reports?: FellerReport[] };
 };
 
 const quarters = [
@@ -231,6 +241,7 @@ export default function Home() {
   const [activeNav, setActiveNav] = useState("Credit view");
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>("revenue");
   const [period, setPeriod] = useState<"5Y" | "20Q">("20Q");
+  const [selectedQuarter, setSelectedQuarter] = useState("");
   const [isDark, setIsDark] = useState(true);
   const [isWatched, setIsWatched] = useState(false);
   const [search, setSearch] = useState("");
@@ -278,6 +289,10 @@ export default function Home() {
     return () => controller.abort();
   }, [selectedIssuer.rut]);
 
+  useEffect(() => {
+    setSelectedQuarter("");
+  }, [selectedIssuer.rut]);
+
   const filteredSearchItems = useMemo(() => {
     const query = search.trim().toLowerCase();
     const matches = query
@@ -307,6 +322,18 @@ export default function Home() {
   });
   const currency = sourceUnits.find((unit) => /(?:iso4217:)?[A-Z]{3}/.test(unit))?.replace("iso4217:", "") ?? "No informada";
   const availableSeries = Object.values(issuerData.metrics).filter((metric) => metric.values.length > 0).length;
+  const quarterOptions = useMemo(() => {
+    const periods = Object.values(issuerData.metrics)
+      .flatMap((metric) => metric.periods ?? [])
+      .map((value) => {
+        const match = value.match(/^(\d{4})-(\d{2})/);
+        return match ? `${match[1]}${match[2]}` : /^\d{6}$/.test(value) ? value : null;
+      })
+      .filter((value): value is string => Boolean(value));
+    return [...new Set(periods)].sort();
+  }, [issuerData.metrics]);
+  const effectiveQuarter = selectedQuarter || quarterOptions.at(-1) || latestDocument?.period || "";
+  const latestFellerReport = issuerData.feller?.reports?.[0];
   const ratioValue = (key: string) => {
     const ratio = issuerData.ratios?.[key];
     if (!ratio?.available || ratio.value === null || !Number.isFinite(ratio.value)) return notAvailable;
@@ -405,7 +432,7 @@ export default function Home() {
                 <div className="issuer-subtitle"><span className="ticker">CMF / EMISOR</span><span>·</span><span>RUT {selectedIssuer.rut}</span><span>·</span><span>Emisor vigente</span></div>
               </div>
             </div>
-            <div className="issuer-actions"><button className={`watch-button ${isWatched ? "watched" : ""}`} onClick={() => setIsWatched((value) => !value)}><span>{isWatched ? "★" : "☆"}</span>{isWatched ? "En seguimiento" : "Seguir emisor"}</button><a className="report-button" href={`/api/pdf?rut=${encodeURIComponent(selectedIssuer.rut)}`} target="_blank" rel="noreferrer">Informe PDF <span>↗</span></a></div>
+            <div className="issuer-actions"><button className={`watch-button ${isWatched ? "watched" : ""}`} onClick={() => setIsWatched((value) => !value)}><span>{isWatched ? "★" : "☆"}</span>{isWatched ? "En seguimiento" : "Seguir emisor"}</button><label className="quarter-picker"><span>Trimestre PDF</span><select value={effectiveQuarter} onChange={(event) => setSelectedQuarter(event.target.value)} disabled={!quarterOptions.length}><option value="">Último disponible</option>{quarterOptions.map((quarter) => <option key={quarter} value={quarter}>{formatPeriod(quarter)}</option>)}</select></label><a className="report-button" href={`/api/pdf?rut=${encodeURIComponent(selectedIssuer.rut)}&quarter=${encodeURIComponent(effectiveQuarter)}`} target="_blank" rel="noreferrer">Informe PDF <span>↗</span></a></div>
           </div>
 
           <div className="issuer-data-status" aria-live="polite">
@@ -420,7 +447,7 @@ export default function Home() {
           </div>
 
           <div className="rating-strip">
-            <div className="rating-summary official-summary"><div className="strip-label">CLASIFICACIÓN OFICIAL</div><div className="rating-main"><RatingBadge rating={currentRating?.rating ?? "N/D"} /><div><strong>{currentRating?.agency ?? notAvailable}</strong><span>{currentRating ? `${currentRating.outlook} · ${currentRating.date}` : "Sin rating CMF ingerido"}</span></div></div></div>
+            <div className="rating-summary official-summary"><div className="strip-label">CLASIFICACIÓN OFICIAL</div><div className="rating-main"><RatingBadge rating={latestFellerReport?.rating ?? currentRating?.rating ?? "N/D"} /><div><strong>{latestFellerReport ? "Feller Rate" : currentRating?.agency ?? notAvailable}</strong><span>{latestFellerReport ? `${latestFellerReport.outlook ?? "N/D"} · ${latestFellerReport.publishedAt ?? ""}` : currentRating ? `${currentRating.outlook} · ${currentRating.date}` : "Sin rating ingerido"}</span></div></div></div>
             <div className="rating-summary model-summary"><div className="strip-label">MODELO INTERNO · HYBRID SCORE</div><div className="rating-main"><RatingBadge rating="N/D" /><div><strong>— <small>/ 100</small></strong><span>{issuerData.hasXbrl ? "Inputs XBRL disponibles · modelo pendiente" : "Sin inputs XBRL validados"}</span></div></div></div>
             <div className="strip-factors"><div><span>Trend</span><strong>{issuerData.hasXbrl ? "— Pendiente de modelo" : "— Sin datos"}</strong></div><div><span>Watch</span><strong>— Sin datos</strong></div><div><span>Data as of</span><strong>{latestDocument ? `CMF · ${latestPeriod}` : "CMF · pendiente de ingesta"}</strong></div></div>
           </div>

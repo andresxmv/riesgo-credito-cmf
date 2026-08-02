@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,46 @@ RATIO_DEFINITIONS = {
     "operatingCashFlow": ("Operating Cash Flow", "operating_cash_flow", None, "XBRL"),
     "capex": ("Capex", "capex", None, "XBRL"),
 }
+
+
+def normalized_issuer_name(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value or "")
+    without_accents = "".join(character for character in decomposed if not unicodedata.combining(character))
+    return " ".join("".join(character if character.isalnum() else " " for character in without_accents.upper()).split())
+
+
+def load_feller_profiles(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return parsed.get("profiles", []) if isinstance(parsed, dict) else []
+
+
+def feller_for_issuer(name: str, profiles: list[dict[str, Any]]) -> dict[str, Any] | None:
+    normalized_name = normalized_issuer_name(name)
+    candidates = [(profile, normalized_issuer_name(str(profile.get("name", "")))) for profile in profiles]
+    profile = next((profile for profile, normalized in candidates if normalized and normalized == normalized_name), None)
+    if profile is None:
+        profile = next(
+            (
+                profile
+                for profile, normalized in candidates
+                if len(normalized) >= 10 and (normalized in normalized_name or normalized_name in normalized)
+            ),
+            None,
+        )
+    if profile is None:
+        return None
+    return {
+        "source": "Feller Rate",
+        "profileId": profile.get("profileId"),
+        "profileUrl": profile.get("profileUrl"),
+        "name": profile.get("name"),
+        "reports": profile.get("reports", []),
+    }
 
 
 def local_concept(value: str) -> str:
@@ -248,7 +289,8 @@ def finalize_ratios(
     return result
 
 
-def build(db_path: Path, output_path: Path) -> dict[str, Any]:
+def build(db_path: Path, output_path: Path, feller_path: Path) -> dict[str, Any]:
+    feller_profiles = load_feller_profiles(feller_path)
     connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -267,6 +309,9 @@ def build(db_path: Path, output_path: Path) -> dict[str, Any]:
                 "riskFlags": [],
                 "lineage": {"source": "CMF XBRL", "documents": []},
             }
+            feller = feller_for_issuer(row["name"], feller_profiles)
+            if feller:
+                issuers[row["rut"]]["feller"] = feller
 
         for rut in issuers:
             documents = connection.execute(
@@ -365,7 +410,7 @@ def build(db_path: Path, output_path: Path) -> dict[str, Any]:
             payload["ratios"] = finalize_ratios(selected_facts_by_rut[rut], metrics)
 
         result = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generatedAt": datetime.now(timezone.utc).isoformat(),
             "source": "CMF XBRL",
             "periods": {"from": "202003", "to": "202612"},
@@ -389,8 +434,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Construye el read model gratuito desde CMF XBRL")
     parser.add_argument("--db", type=Path, default=Path("data/cmf/cmf.db"))
     parser.add_argument("--output", type=Path, default=Path("public/data/cmf-financials.json"))
+    parser.add_argument("--feller", type=Path, default=Path("data/feller/feller_rate.json"))
     args = parser.parse_args()
-    print(json.dumps(build(args.db, args.output), ensure_ascii=False))
+    print(json.dumps(build(args.db, args.output, args.feller), ensure_ascii=False))
     return 0
 
 

@@ -7,12 +7,30 @@ export const dynamic = "force-dynamic";
 
 type Metric = { values?: number[]; periods?: string[]; unit?: string };
 type Ratio = { value?: number | null; unit?: string; period?: string | null; available?: boolean };
+type FellerRow = { instrument?: string; date?: string; rating?: string; outlook?: string };
+type FellerReport = {
+  publishedAt?: string | null;
+  title?: string;
+  rating?: string | null;
+  outlook?: string | null;
+  watch?: string | null;
+  classificationRows?: FellerRow[];
+  technicalSignals?: {
+    topics?: string[];
+    hasBaseScenario?: boolean;
+    hasDownsideScenario?: boolean;
+    hasUpsideScenario?: boolean;
+  };
+  sourceUrl?: string;
+  pdfUrl?: string;
+};
 type IssuerPayload = {
   name?: string;
   hasXbrl?: boolean;
   metrics?: Record<string, Metric>;
   ratios?: Record<string, Ratio>;
   lineage?: { source?: string; documents?: { period: string; sourceUrl: string; contentHash: string; retrievedAt: string }[] };
+  feller?: { profileUrl?: string; reports?: FellerReport[] };
 };
 
 function cleanRut(value: string) {
@@ -45,6 +63,55 @@ function periodLabel(value: string | null | undefined) {
   const year = match[1];
   const month = Number(match[2]);
   return `${Math.ceil(month / 3)}T${year}`;
+}
+
+function periodToken(value: string | null | undefined) {
+  if (!value) return null;
+  if (/^\d{6}$/.test(value)) return value;
+  const match = value.match(/^(\d{4})-(\d{2})/);
+  return match ? `${match[1]}${match[2]}` : null;
+}
+
+function requestedQuarter(value: string | null) {
+  return value && /^\d{4}(03|06|09|12)$/.test(value) ? value : null;
+}
+
+function selectQuarter(requested: string | null, periods: string[]) {
+  const available = [...new Set(periods.map(periodToken).filter((period): period is string => Boolean(period)))].sort();
+  if (!available.length) return requested ?? null;
+  if (!requested) return available.at(-1) ?? null;
+  return available.filter((period) => period <= requested).at(-1) ?? available[0];
+}
+
+function metricAt(metric: Metric | undefined, quarter: string | null) {
+  if (!metric?.values?.length) return null;
+  const periods = metric.periods ?? [];
+  let index = metric.values.length - 1;
+  if (quarter) {
+    const candidate = periods.reduce((current, period, position) => {
+      const token = periodToken(period);
+      return token && token <= quarter ? position : current;
+    }, -1);
+    if (candidate >= 0) index = candidate;
+  }
+  return metric.values[index] ?? null;
+}
+
+function ratioAt(ratio: Ratio | undefined, quarter: string | null) {
+  if (!ratio?.available || ratio.value === null || ratio.value === undefined) return null;
+  const series = (ratio as Ratio & { series?: { period: string; value: number }[] }).series ?? [];
+  if (!quarter || !series.length) return ratio.value;
+  const selected = series.filter((point) => {
+    const token = periodToken(point.period);
+    return token && token <= quarter;
+  });
+  return selected.at(-1)?.value ?? ratio.value;
+}
+
+function fellerReportAt(reports: FellerReport[] | undefined, quarter: string | null) {
+  const sorted = [...(reports ?? [])].sort((left, right) => (left.publishedAt ?? "").localeCompare(right.publishedAt ?? ""));
+  if (!quarter) return sorted.at(-1);
+  return sorted.filter((report) => (report.publishedAt ?? "").replace(/-/g, "").slice(0, 6) <= quarter).at(-1) ?? sorted[0];
 }
 
 function linesForPage(title: string, subtitle: string, lines: string[]) {
@@ -115,6 +182,7 @@ function buildPdf(pages: string[][]) {
 
 export async function GET(request: NextRequest) {
   const rut = cleanRut(new URL(request.url).searchParams.get("rut") ?? "");
+  const requested = requestedQuarter(new URL(request.url).searchParams.get("quarter"));
   if (!rut) return Response.json({ error: "RUT requerido" }, { status: 400 });
 
   try {
@@ -126,21 +194,38 @@ export async function GET(request: NextRequest) {
     const metrics = payload.metrics ?? {};
     const ratios = payload.ratios ?? {};
     const documents = payload.lineage?.documents ?? [];
+    const allPeriods = Object.values(metrics).flatMap((metric) => metric.periods ?? []);
+    const selectedQuarter = selectQuarter(requested, [...allPeriods, ...documents.map((document) => document.period)]);
+    const fellerReport = fellerReportAt(payload.feller?.reports, selectedQuarter);
+    const fellerSignals = fellerReport?.technicalSignals;
+    const fellerRows = fellerReport?.classificationRows ?? [];
+    const fellerTechnicalLines = fellerReport
+      ? [
+          `Informe Feller Rate: ${fellerReport.publishedAt ?? "fecha no informada"}`,
+          `Rating de solvencia: ${fellerReport.rating ?? "N/D"} | Perspectiva: ${fellerReport.outlook ?? "N/D"} | Watch: ${fellerReport.watch ?? "N/D"}`,
+          `Instrumentos observados: ${fellerRows.map((row) => `${row.instrument ?? "Instrumento"} ${row.rating ?? "N/D"}`).join("; ") || "N/D"}`,
+          `Ejes técnicos: ${fellerSignals?.topics?.join(", ") || "N/D"}`,
+          `Escenarios: base ${fellerSignals?.hasBaseScenario ? "sí" : "no"}; baja ${fellerSignals?.hasDownsideScenario ? "sí" : "no"}; alza ${fellerSignals?.hasUpsideScenario ? "sí" : "no"}`,
+          `Fuente técnica: ${fellerReport.sourceUrl ?? payload.feller?.profileUrl ?? "N/D"}`,
+        ]
+      : ["No hay informe Feller público asociado al trimestre seleccionado."];
     const pages = [
       linesForPage("Credit report", `${payload.name ?? "Emisor"} | RUT ${rut}`, [
         "Executive summary",
         payload.hasXbrl ? `EEFF XBRL disponibles: ${documents.length} documentos` : "No hay EEFF XBRL incorporados para este emisor",
-        `Ultimo periodo: ${periodLabel(documents[0]?.period)}`,
+        `Trimestre analizado: ${periodLabel(selectedQuarter)}`,
+        `Informe Feller utilizado: ${fellerReport?.publishedAt ?? "No disponible"}`,
+        `Perspectiva Feller: ${fellerReport?.outlook ?? "N/D"}`,
         "Este documento presenta valores reportados y ratios derivados del read model CMF XBRL.",
         "No reemplaza una opinion de clasificacion de riesgo.",
       ]),
+      linesForPage("Feller technical reference", `${payload.name ?? "Emisor"} | Base externa para el análisis`, fellerTechnicalLines),
       linesForPage("Key financials", `${payload.name ?? "Emisor"} | Valores publicados en XBRL`, Object.entries(metrics).map(([key, metric]) => {
-        const values = metric.values ?? [];
-        return `${key.padEnd(22)} ${formatNumber(values.at(-1))} ${metric.unit ?? ""} | ${periodLabel(metric.periods?.at(-1))}`;
+        return `${key.padEnd(22)} ${formatNumber(metricAt(metric, selectedQuarter))} ${metric.unit ?? ""} | ${periodLabel(selectedQuarter)}`;
       })),
       linesForPage("Credit ratios", `${payload.name ?? "Emisor"} | Derivados de estados financieros`, Object.entries(ratios).map(([key, ratio]) => {
-        const value = ratio.available ? formatNumber(ratio.value) : "N/D";
-        return `${key.padEnd(22)} ${value} ${ratio.unit ?? ""} | ${periodLabel(ratio.period)}`;
+        const value = ratio.available ? formatNumber(ratioAt(ratio, selectedQuarter)) : "N/D";
+        return `${key.padEnd(22)} ${value} ${ratio.unit ?? ""} | ${periodLabel(selectedQuarter)}`;
       })),
       linesForPage("Financial history", `${payload.name ?? "Emisor"} | Ultimos periodos`, [
         ...["revenue", "ebitda", "ebit", "income", "cash", "debt"].flatMap((key) => {
@@ -152,13 +237,13 @@ export async function GET(request: NextRequest) {
       linesForPage("Source appendix", `${payload.name ?? "Emisor"} | Trazabilidad`, documents.slice(0, 30).flatMap((document) => [
         `${periodLabel(document.period)} | SHA-256 ${document.contentHash}`,
         document.sourceUrl,
-      ])),
+      ]).concat(fellerReport ? [`Feller Rate | ${fellerReport.sourceUrl ?? "N/D"}`, `PDF fuente | ${fellerReport.pdfUrl ?? "N/D"}`] : [])),
     ];
     const pdf = buildPdf(pages);
     return new Response(pdf, {
       headers: {
         "content-type": "application/pdf",
-        "content-disposition": `attachment; filename="cmf-creditview-${rut}.pdf"`,
+        "content-disposition": `attachment; filename="cmf-creditview-${rut}-${selectedQuarter ?? "latest"}.pdf"`,
         "cache-control": "no-store",
       },
     });

@@ -54,3 +54,17 @@ Cada documento usa `(issuer_rut, period, statement_type)` como clave unica y con
 ## Modelo interno
 
 El score 0-100 debe combinar CAPIC 2017, Altman Z, Ohlson O, cobertura de intereses, deuda neta/EBITDA, liquidez, rentabilidad, FCF, tendencias y volatilidades. Cada version debe guardar pesos, inputs, missingness y timestamp. La conversion AAA-CCC se aplica despues y se rotula siempre como estimada.
+## Feller Rate
+
+`etl/feller_rate.py` recorre el índice público de clasificaciones de Feller Rate Chile, descubre los perfiles de emisores y captura sus comunicados históricos. El proceso es incremental: los informes ya presentes en `data/feller/cache.json` se reutilizan y la salida estructurada queda en `data/feller/feller_rate.json`.
+
+Se conservan campos técnicos, no el texto completo del informe: fecha, rating de solvencia, perspectiva, watch, instrumentos observados, escenarios, ejes de análisis y enlaces públicos al informe y PDF original. `build_public_metrics.py` cruza los perfiles por nombre normalizado con los emisores CMF y los incorpora al read model público.
+
+Ejecutar:
+
+```bash
+python etl/feller_rate.py
+python etl/build_public_metrics.py
+```
+
+El PDF recibe el trimestre como `quarter=YYYYMM`; selecciona el último trimestre CMF disponible no posterior al solicitado y el informe Feller publicado hasta ese corte.
