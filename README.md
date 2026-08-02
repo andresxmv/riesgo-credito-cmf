@@ -1,70 +1,61 @@
 # CMF CreditView
 
-Superficie profesional de análisis de riesgo de crédito para emisores chilenos. La primera entrega implementa la capa de producto y su lenguaje visual tipo terminal de crédito: navegación lateral, búsqueda global, ficha de emisor, ratings oficiales separados del modelo interno, historia trimestral, memo analítico y timeline de eventos.
+Superficie profesional de analisis de riesgo de credito para emisores chilenos. La interfaz usa una densidad tipo Bloomberg CreditView: navegacion lateral, buscador global, ficha de emisor, historia trimestral, ratings oficiales separados del modelo interno y trazabilidad de documentos.
 
-> La interfaz incluye un snapshot local de 346 emisores vigentes publicado por la CMF. Los valores financieros visibles siguen rotulados como referencia hasta conectar el ETL histórico; el navegador no consulta la CMF directamente.
-
-## Estado de la entrega
-
-### Implementado
-
-- Shell tipo Bloomberg Credit / CreditView, sin patrón de dashboard de tarjetas gigantes.
-- Tema oscuro y claro, layout responsive y densidad configurable.
-- Navegación de workspace, buscador global con `⌘ K`, seguimiento de emisor y generación visual de informe.
-- Catálogo local de 346 emisores vigentes CMF, buscable por razón social y RUT, sin llamadas desde el navegador.
-- Ficha de emisor con identidad, sector, industria, ISIN, auditor, market cap y moneda.
-- KPIs de crédito: ingresos TTM, EBITDA, leverage, cobertura, liquidez, ROIC, FCF y deuda/activos.
-- Historia de 20 trimestres con selector de métrica y ventana 5Y/20Q.
-- Tabla de clasificación oficial por agencia, perspectiva, fecha y fuente.
-- Clasificación estimada separada: score, confidence, outlook y trend.
-- Credit memo con risk flags, catalizadores y trazabilidad de fuente.
-- Timeline de ratings, bonos, refinanciamientos y dividendos.
-- Build reproducible con `vinext` y salida compatible con Sites.
-
-### Siguiente capa de producción
-
-La conexión CMF → ETL → Supabase → FastAPI → Next.js se debe activar antes de considerar cumplidos los criterios de cobertura de emisores, historia financiera, PDF institucional y pruebas de extremo a extremo. Los contratos y límites están documentados en [`docs/`](docs/).
-
-## Arquitectura objetivo
+## Flujo real implementado
 
 ```text
-CMF public sources
-        ↓
-Incremental ETL (Python · lxml · httpx · tenacity · APScheduler)
-        ↓
-Supabase PostgreSQL + object storage for source documents
-        ↓
-FastAPI · validation · rate limit · cached read models
-        ↓
-Next.js / React · Server Components · TanStack Query
+CMF public sources -> ETL incremental Python -> SQLite/PostgreSQL -> FastAPI -> Next.js
 ```
 
-El navegador nunca consulta directamente a la CMF. Los documentos y hechos se incorporan con checksum, timestamp, fuente y estado de extracción para que el proceso sea idempotente.
+- El catalogo local contiene 346 emisores vigentes publicados por la CMF.
+- El ETL consulta la pagina oficial del emisor y descarga el ZIP `Estados financieros (XBRL)` por RUT, periodo y balance.
+- Se conserva el ZIP original, hash SHA-256, URL de origen y timestamp.
+- El parser extrae hechos IFRS/XBRL, contextos, periodos, unidades y dimensiones.
+- El manifiesto evita volver a descargar un documento ya ingerido.
+- FastAPI sirve solo datos persistidos; el navegador nunca consulta directamente la CMF.
+- La ficha solicita `/api/issuer/{rut}/financials` al cambiar de emisor.
+- Si la API no esta configurada o no existe el periodo, se muestra estado vacio y no valores inventados.
 
-## Desarrollo local
+## Ejecutar
 
-Requisitos: Node.js `>=22.13.0`.
+Requisitos: Node.js >=22.13.0 y Python 3.12 (Python 3.9 tambien funciona para el ETL actual).
 
 ```bash
 npm install
 npm run dev
-npm run build
-npm test
-npm run lint
+
+python -m pip install -r api/requirements.txt
+python -m etl.cmf_xbrl --rut 61704000 --year 2025 --month 3 --balance C --data-dir data/cmf
+uvicorn api.main:app --reload --port 8000
 ```
 
-## Estructura relevante
+La primera descarga guarda los hechos en `data/cmf/cmf.db`; la segunda ejecucion del mismo comando devuelve `skipped`. Para todo el catalogo:
 
-- `app/page.tsx`: primera superficie interactiva de CreditView y buscador global.
-- `app/issuer-catalog.ts`: snapshot local del listado vigente de emisores de valores de la CMF.
-- `app/globals.css`: sistema visual, densidad, estados, tablas, gráficos y responsive.
-- `app/layout.tsx`: metadata y marco global.
-- `docs/architecture.md`: límites de los servicios y flujo de datos.
-- `docs/data-model.md`: entidades, claves e índices propuestos.
-- `docs/etl.md`: estrategia incremental e idempotente.
-- `docs/api.md`: contratos iniciales de FastAPI.
-- `docs/deployment.md`: despliegue objetivo y gates de aceptación.
+```bash
+python -m etl.cmf_xbrl --all --from-year 2017 --to-year 2026 --months 3,6,9,12 --data-dir data/cmf
+```
 
-## Nota de datos
+## Variables de despliegue
 
-El catálogo de emisores se toma del listado vigente de valores publicado por la CMF y se sirve desde el bundle de la aplicación. Los valores financieros de la primera versión están diseñados para probar jerarquía, densidad y estados de la interfaz; al conectar el ETL deben reemplazarse por registros validados y conservar la línea de procedencia en cada respuesta, rating, ratio y documento.
+- `CMF_DB_PATH`: ruta del SQLite que lee FastAPI en desarrollo.
+- `CMF_API_URL`: URL publica del servicio FastAPI en Render; se configura en Vercel.
+- `CMF_ALLOWED_ORIGINS`: origenes permitidos para FastAPI.
+
+La migracion inicial de Supabase esta en `supabase/migrations/20260802000000_cmf_xbrl.sql`. El servicio Render usa `render.yaml` como base de despliegue.
+
+## Pruebas
+
+```bash
+python -m pytest etl/tests api/tests -q
+npm run build
+node --test tests/rendered-html.test.mjs
+```
+
+## Documentacion
+
+- `docs/architecture.md`: limites de los servicios.
+- `docs/data-model.md`: entidades e indices.
+- `docs/etl.md`: estrategia incremental y parser XBRL.
+- `docs/api.md`: contratos de FastAPI.
+- `docs/deployment.md`: despliegue y gates.

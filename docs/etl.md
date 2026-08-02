@@ -2,31 +2,43 @@
 
 ## Job graph
 
-1. `discover_issuers`: actualiza catálogo de emisores y conserva bajas.
+1. `discover_issuers`: actualiza el catalogo de emisores y conserva bajas.
 2. `discover_periods`: identifica nuevos trimestres y cierres.
-3. `fetch_documents`: descarga solo URLs nuevas o con ETag/Last-Modified cambiado.
-4. `parse_xbrl`: normaliza hechos IFRS y unidades.
-5. `parse_documents`: extrae análisis razonados, hechos esenciales y ratings.
-6. `derive_financials`: calcula ratios y vistas TTM.
+3. `fetch_documents`: descarga solo documentos que no existen en el manifiesto.
+4. `parse_xbrl`: normaliza hechos IFRS, contextos, unidades y dimensiones.
+5. `parse_documents`: extrae analisis razonados, hechos esenciales y ratings.
+6. `derive_financials`: calcula ratios y vistas TTM con reglas versionadas.
 7. `derive_credit_model`: versiona score, confidence, outlook, trend y risk flags.
-8. `publish_read_models`: actualiza materializaciones y cache Redis.
+8. `publish_read_models`: actualiza las tablas de lectura y la cache.
 
-## Catálogo inicial
+## Implementacion actual
 
-La primera entrega incluye el snapshot local `app/issuer-catalog.ts` con los 346 emisores vigentes del listado de Emisores de valores de la CMF. Es una semilla de lectura para que el buscador funcione sin consultar la CMF desde el navegador. En producción, `discover_issuers` debe reemplazarlo mediante un job incremental, conservar bajas y registrar `source`, `retrieved_at` y el hash del archivo descargado.
+`etl/cmf_xbrl.py` implementa el primer job real:
 
-## Idempotencia
+- obtiene el catalogo oficial `consulta.php?Estado=VI&entidad=RVEMI&mercado=V`;
+- construye la pagina historica por RUT, ano, mes y balance consolidado/individual;
+- localiza el enlace oficial `Estados financieros (XBRL)`;
+- descarga el ZIP, calcula SHA-256 y guarda el original;
+- extrae la instancia `.xbrl`/`.xml`, ignorando taxonomias auxiliares;
+- normaliza hechos, contextos, periodos, unidades y dimensiones a SQLite;
+- salta documentos ya ingeridos cuando el manifiesto y el ZIP local existen.
 
-Cada elemento de descarga debe tener una clave de deduplicación compuesta por `source`, `canonical_url`, `content_hash`, `issuer_id` y período. Antes de descargar se consulta el estado de la fuente. Si el hash no cambia, se registra un check de freshness y no se vuelve a procesar el documento.
+Ejemplo:
 
-## Manejo de fallos
+```bash
+python -m etl.cmf_xbrl --rut 61704000 --year 2025 --month 3 --balance C --data-dir data/cmf
+```
 
-- Backoff exponencial con jitter y máximo de intentos.
-- Dead-letter table para documentos no parseables.
-- Parseo parcial permitido solo cuando queda marcado el campo faltante.
-- Job resumible por emisor y período.
-- Alertas cuando la frescura por tipo de documento supera el SLA.
+La verificacion contra la CMF genero 8.168 hechos para `61704000 / 202503 / C`. Una segunda ejecucion devolvio `skipped`. `data/cmf/` esta ignorado por Git porque contiene documentos fuente descargados.
+
+## Catalogo
+
+El snapshot local `app/issuer-catalog.ts` contiene 346 emisores vigentes. El ETL puede obtener el catalogo nuevamente con `--all` y debe publicar esa version en la tabla `issuer` durante el job productivo.
+
+## Idempotencia y fallos
+
+Cada documento usa `(issuer_rut, period, statement_type)` como clave unica y conserva `content_hash`, `source_url`, `local_path` y `retrieved_at`. Las solicitudes HTTP usan backoff exponencial con jitter. Los errores se registran por emisor y periodo para que el proceso pueda reanudarse.
 
 ## Modelo interno
 
-El score 0–100 combina CAPIC 2017, Altman Z, Ohlson O, cobertura de intereses, deuda neta/EBITDA, liquidez, rentabilidad, FCF, tendencias y volatilidades. Cada versión guarda pesos, inputs, missingness y timestamp. La conversión a AAA–CCC se aplica después de calcular el score y se rotula siempre como estimada.
+El score 0-100 debe combinar CAPIC 2017, Altman Z, Ohlson O, cobertura de intereses, deuda neta/EBITDA, liquidez, rentabilidad, FCF, tendencias y volatilidades. Cada version debe guardar pesos, inputs, missingness y timestamp. La conversion AAA-CCC se aplica despues y se rotula siempre como estimada.

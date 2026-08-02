@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: riesgo-credito-cmf-api
+    runtime: python
+    rootDir: api
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: CMF_DB_PATH
+        value: /var/data/cmf.db
+      - key: CMF_ALLOWED_ORIGINS
+        sync: false
+

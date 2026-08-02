@@ -11,6 +11,9 @@ type MetricData = {
   values: number[];
   change: string | null;
   tone: string;
+  periods?: string[];
+  source?: string;
+  sourceUnit?: string | string[];
 };
 
 type RatingRow = {
@@ -95,7 +98,7 @@ const metricDefinitions: Record<MetricKey, Pick<MetricData, "label" | "unit" | "
 
 const emptyMetricData = Object.fromEntries(
   Object.entries(metricDefinitions).map(([key, definition]) => [key, { ...definition, values: [], change: null }]),
-) as Record<MetricKey, MetricData>;
+) as unknown as Record<MetricKey, MetricData>;
 
 const emptyIssuerView: IssuerViewData = {
   metrics: emptyMetricData,
@@ -140,6 +143,13 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("es-CL").format(value);
 }
 
+function formatPeriod(value: string) {
+  if (!/^\d{6}$/.test(value)) return value;
+  const year = value.slice(0, 4);
+  const month = Number(value.slice(4, 6));
+  return `${Math.ceil(month / 3)}T${year.slice(2)}`;
+}
+
 function RatingBadge({ rating, subtle = false }: { rating: string; subtle?: boolean }) {
   return <span className={`rating-badge ${subtle ? "rating-badge-subtle" : ""}`}>{rating}</span>;
 }
@@ -159,8 +169,9 @@ function BarChart({ data, period }: { data: MetricData; period: "5Y" | "20Q" }) 
     return <div className="chart-empty">Sin estados financieros XBRL ingeridos para este emisor.</div>;
   }
 
+  const labels = data.periods?.length ? data.periods : quarters;
   const visibleValues = period === "5Y" ? data.values.slice(-12) : data.values;
-  const visibleQuarters = period === "5Y" ? quarters.slice(-12) : quarters;
+  const visibleQuarters = period === "5Y" ? labels.slice(-12) : labels;
   const max = Math.max(...visibleValues);
   const min = Math.min(...visibleValues);
   const range = Math.max(max - min, 1);
@@ -180,11 +191,12 @@ function BarChart({ data, period }: { data: MetricData; period: "5Y" | "20Q" }) 
           {visibleValues.map((value, index) => {
             const height = 22 + ((value - min) / range) * 68;
             const isLatest = index === visibleValues.length - 1;
+            const label = formatPeriod(visibleQuarters[index] ?? "");
             return (
-              <div className="bar-column" key={`${visibleQuarters[index]}-${value}`}>
+              <div className="bar-column" key={`${label}-${value}`}>
                 <div className={`bar-tooltip ${isLatest ? "bar-tooltip-visible" : ""}`}>{formatNumber(value)}</div>
                 <div className={`bar ${data.tone} ${isLatest ? "bar-latest" : ""}`} style={{ height: `${height}%` }} />
-                <span>{visibleQuarters[index]}</span>
+                <span>{label}</span>
               </div>
             );
           })}
@@ -202,6 +214,8 @@ export default function Home() {
   const [isWatched, setIsWatched] = useState(false);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [issuerDataByRut, setIssuerDataByRut] = useState<Record<string, IssuerViewData>>({});
+  const [dataLoading, setDataLoading] = useState(false);
   const [selectedIssuer, setSelectedIssuer] = useState(() => issuerCatalog.find((item) => item.name === "CENCOSUD S.A.") ?? issuerCatalog[0]);
 
   useEffect(() => {
@@ -217,6 +231,32 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    const rut = selectedIssuer.rut;
+    setDataLoading(true);
+
+    fetch(`/api/issuer/${encodeURIComponent(rut)}/financials`, {
+      signal: controller.signal,
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`API ${response.status}`);
+        return (await response.json()) as IssuerViewData;
+      })
+      .then((data) => {
+        setIssuerDataByRut((current) => ({ ...current, [rut]: data }));
+      })
+      .catch(() => {
+        // La ficha queda explícitamente vacía si la API no está disponible;
+        // nunca se reemplaza por métricas inventadas o datos de otro emisor.
+      })
+      .finally(() => setDataLoading(false));
+
+    return () => controller.abort();
+  }, [selectedIssuer.rut]);
+
   const filteredSearchItems = useMemo(() => {
     const query = search.trim().toLowerCase();
     const matches = query
@@ -225,7 +265,7 @@ export default function Home() {
     return matches.slice(0, 8);
   }, [search]);
 
-  const issuerData = useMemo(() => getIssuerViewData(selectedIssuer.rut), [selectedIssuer.rut]);
+  const issuerData = issuerDataByRut[selectedIssuer.rut] ?? getIssuerViewData(selectedIssuer.rut);
   const selectedData = issuerData.metrics[selectedMetric];
   const hasFinancials = issuerData.hasXbrl && selectedData.values.length > 0;
   const issuerInitials = selectedIssuer.name
@@ -237,6 +277,11 @@ export default function Home() {
     .toUpperCase();
   const currentRating = issuerData.ratings[0];
   const notAvailable = "No disponible";
+  const ttmValue = (key: MetricKey) => {
+    const metric = issuerData.metrics[key];
+    if (!issuerData.hasXbrl || !metric.values.length) return notAvailable;
+    return `${formatNumber(metric.values.slice(-4).reduce((sum, value) => sum + value, 0))} ${metric.unit}`;
+  };
 
   return (
     <main className={`creditview-shell ${isDark ? "theme-dark" : "theme-light"}`}>
@@ -309,7 +354,7 @@ export default function Home() {
         </header>
 
         <div className="page-content">
-          <div className="demo-banner"><span className="banner-pulse" /> <strong>CMF issuer master</strong><span>{formatNumber(issuerCatalog.length)} emisores vigentes · snapshot {issuerCatalogAsOf} · {issuerCatalogSource}; estados financieros XBRL pendientes de ingestión.</span><button>Ver arquitectura →</button></div>
+          <div className="demo-banner"><span className="banner-pulse" /> <strong>CMF issuer master</strong><span>{formatNumber(issuerCatalog.length)} emisores vigentes · snapshot {issuerCatalogAsOf} · {issuerCatalogSource}; {dataLoading ? "consultando API XBRL…" : hasFinancials ? "EEFF XBRL cargados desde el backend." : "sin EEFF XBRL para este emisor."}</span><button>Ver arquitectura →</button></div>
 
           <div className="issuer-heading">
             <div className="issuer-title-wrap">
@@ -338,8 +383,8 @@ export default function Home() {
           <section className="section-block">
             <div className="section-heading"><div><span className="eyebrow">KEY CREDIT METRICS</span><h2>Credit snapshot</h2></div><div className="as-of">Consolidated · TTM <span>ⓘ</span></div></div>
             <div className="metrics-grid">
-              <MetricCell label="Ingresos TTM" value={hasFinancials ? `${formatNumber(selectedData.values.slice(-4).reduce((sum, value) => sum + value, 0))} mm` : notAvailable} detail={hasFinancials ? "CMF XBRL · TTM" : "Sin EEFF XBRL cargados"} tone="gold" />
-              <MetricCell label="EBITDA TTM" value={notAvailable} detail="Sin EEFF XBRL cargados" tone="mint" />
+              <MetricCell label="Ingresos TTM" value={ttmValue("revenue")} detail={hasFinancials ? "CMF XBRL · TTM" : "Sin EEFF XBRL cargados"} tone="gold" />
+              <MetricCell label="EBITDA TTM" value={ttmValue("ebitda")} detail={issuerData.metrics.ebitda.values.length ? "CMF XBRL · TTM" : "Concepto EBITDA no publicado"} tone="mint" />
               <MetricCell label="Net debt / EBITDA" value={notAvailable} detail="Se calcula después de validar XBRL" tone="blue" />
               <MetricCell label="Interest coverage" value={notAvailable} detail="Se calcula después de validar XBRL" tone="mint" />
               <MetricCell label="Current ratio" value={notAvailable} detail="Se calcula después de validar XBRL" />
@@ -355,7 +400,7 @@ export default function Home() {
               <div className="metric-tabs">{(Object.keys(metricDefinitions) as MetricKey[]).map((key) => <button className={`${selectedMetric === key ? "active" : ""} ${metricDefinitions[key].tone}`} key={key} onClick={() => setSelectedMetric(key)}>{metricDefinitions[key].label}</button>)}</div>
               <div className="chart-summary"><div><strong>{hasFinancials ? formatNumber(selectedData.values[selectedData.values.length - 1]) : "—"}</strong><span>{selectedData.unit} · {hasFinancials ? "último período" : "sin datos XBRL"}</span></div><div className="chart-change">{selectedData.change ?? "—"} <span>{hasFinancials ? "vs período anterior" : "pendiente de ingestión CMF"}</span></div></div>
               <BarChart data={selectedData} period={period} />
-              <div className="chart-footnote"><span>Fuente: EEFF consolidados · IFRS</span><span>Último período: 31 dic 2025</span></div>
+              <div className="chart-footnote"><span>Fuente: EEFF consolidados · IFRS · {selectedData.source ?? "CMF XBRL"}</span><span>Último período: {formatPeriod(selectedData.periods?.at(-1) ?? "sin datos")}</span></div>
             </section>
 
             <aside className="panel memo-panel">
@@ -372,7 +417,7 @@ export default function Home() {
             <section className="panel events-panel"><div className="panel-header"><div><span className="eyebrow">PUBLIC DISCLOSURES</span><h2>Recent events</h2></div><button className="text-button">Timeline completa →</button></div><div className="event-list">{issuerData.events.length ? issuerData.events.map((event) => <div className="event-row" key={`${event.date}-${event.title}`}><div className="event-date">{event.date}</div><div className={`event-type ${event.tone}`}>{event.type}</div><div className="event-copy"><strong>{event.title}</strong><span>{event.detail}</span></div><span className="event-arrow">↗</span></div>) : <div className="empty-inline">Sin hechos esenciales, bonos o eventos CMF ingeridos.</div>}</div></section>
           </div>
 
-          <div className="bottom-note"><span className="status-dot" /> <span>All figures in CLP millions unless otherwise stated.</span><span>·</span><span>Source lineage: CMF public filings → ETL → Supabase → FastAPI</span><button>Open data lineage ↗</button></div>
+          <div className="bottom-note"><span className="status-dot" /> <span>Unidades según la instancia XBRL publicada; no se convierten valores sin una regla versionada.</span><span>·</span><span>Source lineage: CMF public filings → ETL → Supabase → FastAPI</span><button>Open data lineage ↗</button></div>
         </div>
       </section>
     </main>

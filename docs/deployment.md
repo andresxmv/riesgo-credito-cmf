@@ -1,23 +1,28 @@
-# Deployment y gates de aceptación
+# Deployment y gates de aceptacion
 
 ## Target
 
-- Frontend: Vercel/Sites con build reproducible.
+- Frontend: Vercel.
 - API: FastAPI en Render.
 - Base de datos: Supabase PostgreSQL.
 - Cache: Redis administrado.
 - Jobs: worker Python separado con scheduler.
-- CI: GitHub Actions para lint, tipos, pytest, Vitest, Playwright y build.
+- CI: GitHub Actions.
+
+## Flujo operativo actual
+
+1. Ejecutar el ETL desde un worker o GitHub Actions con `--all`; el manifiesto evita volver a descargar periodos ya procesados.
+2. En desarrollo, FastAPI lee `CMF_DB_PATH`. En produccion, aplicar `supabase/migrations/20260802000000_cmf_xbrl.sql` y publicar el mismo read model en PostgreSQL/Supabase.
+3. Desplegar FastAPI en Render usando `render.yaml` y comprobar `/health`.
+4. Configurar `CMF_API_URL` en Vercel. Next.js llamara al proxy interno, nunca a la CMF.
+5. Verificar que un RUT con datos muestra `sourceUrl`, hash y timestamp y que un RUT sin datos muestra estado vacio.
+
+La migracion Supabase fue escrita manualmente porque el CLI no esta instalado en este entorno; debe aplicarse con la herramienta de migraciones del proyecto antes del despliegue productivo.
 
 ## Gates
 
 1. El build del frontend debe pasar sin consultar fuentes externas en runtime.
-2. `pytest` debe cubrir parsing, deduplicación, ratios y modelo interno.
-3. `Vitest` debe cubrir transformaciones de view model y estados de rating.
-4. `Playwright` debe validar búsqueda, cambio de métrica, tema y generación de PDF.
-5. El pipeline debe fallar si falta trazabilidad de fuente o si el score interno aparece sin el rótulo de estimado.
-6. Un smoke test debe verificar que un emisor nuevo aparece en búsqueda después de un ciclo ETL.
-
-## Estado actual
-
-La entrega visual está lista y el build del sitio pasa. ETL, FastAPI, Supabase, Redis, ReportLab y las suites de cobertura >90% permanecen como la siguiente fase de implementación; el contrato ya está separado para que la conexión no obligue a rediseñar la superficie.
+2. Pytest debe cubrir parsing, deduplicacion, unidades y contrato de API.
+3. El pipeline debe fallar si falta trazabilidad de fuente.
+4. Un smoke test debe verificar que un emisor nuevo aparece en la busqueda despues de un ciclo ETL.
+5. El score interno nunca debe aparecer sin rotulo de estimado ni inputs versionados.

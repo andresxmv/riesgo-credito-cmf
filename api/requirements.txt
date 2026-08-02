@@ -1,0 +1,5 @@
+-r ../etl/requirements.txt
+fastapi==0.115.11
+uvicorn[standard]==0.34.0
+psycopg[binary]==3.2.6
+
