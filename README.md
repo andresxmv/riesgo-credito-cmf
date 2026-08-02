@@ -34,7 +34,10 @@ La primera descarga guarda los hechos en `data/cmf/cmf.db`; la segunda ejecucion
 
 ```bash
 python -m etl.cmf_xbrl --all --from-year 2017 --to-year 2026 --months 3,6,9,12 --data-dir data/cmf
+python -m etl.publish_postgres --sqlite data/cmf/cmf.db
 ```
+
+El segundo comando requiere `DATABASE_URL` y publica el read model local en Supabase con upserts idempotentes.
 
 ## Variables de despliegue
 

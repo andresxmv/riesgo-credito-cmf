@@ -101,6 +101,13 @@ class ManifestStore:
               retrieved_at TEXT NOT NULL,
               UNIQUE (issuer_rut, period, statement_type)
             );
+            CREATE TABLE IF NOT EXISTS issuer (
+              rut TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT 'CMF',
+              retrieved_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS xbrl_fact (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               source_document_id INTEGER NOT NULL REFERENCES source_document(id),
@@ -124,6 +131,20 @@ class ManifestStore:
             CREATE INDEX IF NOT EXISTS idx_fact_issuer_period
               ON xbrl_fact(issuer_rut, period_end, concept);
             """
+        )
+        self.connection.commit()
+
+    def save_issuer(self, issuer: Issuer) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO issuer (rut, name, status, source, retrieved_at)
+            VALUES (?, ?, ?, 'CMF', ?)
+            ON CONFLICT (rut) DO UPDATE SET
+              name = excluded.name,
+              status = excluded.status,
+              retrieved_at = excluded.retrieved_at
+            """,
+            (rut_key(issuer.rut), issuer.name, issuer.status, utc_now()),
         )
         self.connection.commit()
 
@@ -430,6 +451,8 @@ def main(argv: list[str] | None = None) -> int:
             issuers = [Issuer(args.rut, args.rut)]
         else:
             raise SystemExit("Usa --rut RUT o --all")
+        for issuer in issuers:
+            store.save_issuer(issuer)
         years = range(args.from_year or args.year, (args.to_year or args.year) + 1)
         months = [int(value) for value in args.months.split(",")] if args.all_issuers else [args.month]
         results = []

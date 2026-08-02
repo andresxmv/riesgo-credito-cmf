@@ -31,6 +31,16 @@ python -m etl.cmf_xbrl --rut 61704000 --year 2025 --month 3 --balance C --data-d
 
 La verificacion contra la CMF genero 8.168 hechos para `61704000 / 202503 / C`. Una segunda ejecucion devolvio `skipped`. `data/cmf/` esta ignorado por Git porque contiene documentos fuente descargados.
 
+## Publicacion a Supabase
+
+El downloader escribe primero en SQLite para que cada ciclo sea reanudable. `etl/publish_postgres.py` copia el read model a PostgreSQL usando upserts y las mismas claves unicas:
+
+```bash
+python -m etl.publish_postgres --sqlite data/cmf/cmf.db
+```
+
+El comando usa `DATABASE_URL`, publica catalogo, quarter, documento, hash y hechos, y no elimina datos remotos.
+
 ## Catalogo
 
 El snapshot local `app/issuer-catalog.ts` contiene 346 emisores vigentes. El ETL puede obtener el catalogo nuevamente con `--all` y debe publicar esa version en la tabla `issuer` durante el job productivo.
