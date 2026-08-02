@@ -31,11 +31,8 @@ test("server-renders the CreditView issuer surface", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>CMF CreditView · Credit intelligence for Chile<\/title>/i);
+  assert.match(html, /<title>CMF CreditView/i);
   assert.match(html, /Cencosud S\.A\./i);
-  assert.match(html, /Official ratings/);
-  assert.match(html, /Operating performance/);
-  assert.match(html, /CMF issuer master/);
   assert.match(html, /346(?:<!-- -->)?\s*emisores vigentes/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
@@ -49,9 +46,14 @@ test("does not retain the disposable starter skeleton", async () => {
 
   assert.match(page, /creditview-shell/);
   assert.match(page, /issuerCatalog/);
-  assert.match(page, /CMF issuer master/);
+  assert.match(page, /MAESTRO DE EMISORES CMF/);
+  assert.match(page, /Deuda neta \/ EBITDA/);
+  assert.match(page, /Cobertura de intereses/);
+  assert.match(page, /Liquidez corriente/);
+  assert.match(page, /Clasificaciones oficiales/);
   assert.doesNotMatch(page, /SkeletonPreview|_sites-preview/);
   assert.match(layout, /title:\s*"CMF CreditView/);
+  assert.match(layout, /Inteligencia crediticia para Chile/);
   assert.doesNotMatch(layout, /codex-preview|_sites-preview/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", templateRoot)));

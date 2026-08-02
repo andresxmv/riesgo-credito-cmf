@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CMF CreditView · Credit intelligence for Chile",
+  title: "CMF CreditView · Inteligencia crediticia para Chile",
   description: "Plataforma profesional de análisis de riesgo de crédito para emisores chilenos.",
   icons: {
     icon: "/favicon.svg",
